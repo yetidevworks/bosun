@@ -4,6 +4,46 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.14] — 2026-07-13
+
+### Fixed
+- **New / restarted sessions landed at a bare shell and never launched
+  the agent (tmux 3.7).** The embedded preview attached to each session
+  as a *read-only* client (`tmux attach -f read-only`). tmux 3.7 made
+  `send-keys` refuse to target a session whose resolved client is
+  read-only, failing with `client is read-only` — so while a session was
+  merely being previewed (the normal case), *every* keystroke bosun sends
+  it silently failed: the agent-launch command on a fresh create or
+  restart, the `C-c` that stops a running agent, the redraw `C-l`. The
+  agent never started until the user manually attached a read-write
+  client (focus mode / full `tmux attach`), which is exactly the "it does
+  nothing until I attach, then the keys come through" behaviour. Older
+  tmux ignored the read-only flag for `send-keys`, so this surfaced as a
+  regression after a tmux upgrade.
+
+  The preview now attaches **read-write** like focus mode. The read-only
+  flag was only belt-and-braces — bosun never forwards sidebar input to
+  the embed unless it's focused (every `EmbedTerminal::write` call site is
+  gated on `embed_focused`), and window-size negotiation behaves the same
+  read-write — so dropping it restores working `send-keys` with no change
+  to how previews look or size.
+- **Hardened the launch keystroke against slow shells / `magic-enter`.**
+  Independently of the read-only bug, `restart_in_place` now sends the
+  command **and its Enter as one atomic literal** (a trailing carriage
+  return in the same `send-keys -l`) instead of typing the command and
+  pressing Enter as two separate keystrokes. On a heavy `~/.zshrc` the
+  command text could be swallowed while the shell was still initialising
+  and the separate Enter would land on an empty line — which an oh-my-zsh
+  `magic-enter` binding turns into a stray `ls`. Atomic send makes that
+  impossible, and the launch now confirms the agent actually started and
+  re-sends if a slow shell dropped it (up to three attempts).
+- **No more blank flash entering / leaving focus.** Now that preview and
+  focus attach with identical args, the preview→focus handoff no longer
+  drops and re-attaches the embed (which blanked the pane for a frame
+  while the new attach repainted). It resizes the live embed in place
+  instead — the vt100 grid keeps its content and just reflows around the
+  focus border, so the transition is a single seamless repaint.
+
 ## [2.0.13] — 2026-07-01
 
 ### Added

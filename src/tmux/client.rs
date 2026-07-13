@@ -604,47 +604,93 @@ impl TmuxClient for TokioTmuxClient {
             return Ok(());
         }
 
-        // ── Phase 3: type and submit the launch command ──────────────
-        let mut literal = self.cmd();
-        literal
-            .arg("send-keys")
-            .arg("-l")
-            .arg("-t")
-            .arg(session)
-            .arg("--")
-            .arg(command);
-        if let Err(e) = literal.output().await {
-            tracing::warn!("restart_in_place send-keys -l to {}: {}", session, e);
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        send_keys(vec!["Enter"]).await;
-
-        // ── Phase 4: wait for the new agent to actually start ────────
-        // If we couldn't confirm we were at a shell, don't loop forever
-        // — fall through after a single deadline check. Shell-start has
-        // its own deadline.
-        let start_deadline = Instant::now() + Duration::from_millis(6000);
+        // ── Phase 3 + 4: submit the launch command atomically, confirm
+        // the agent started, and re-send if it didn't ───────────────
+        //
+        // A freshly-created pane may still be sourcing a heavy ~/.zshrc
+        // (antidote, compinit, prompt frameworks, ZLE plugins) when we
+        // type — worst right after a reboot, when shell caches are cold
+        // so the first shell of the session is slowest to come up. The
+        // original failure mode: we typed the command and then sent Enter
+        // as a *separate* keystroke; if the command text was swallowed by
+        // the still-initialising shell but the Enter still landed, it hit
+        // an *empty* line — and with an oh-my-zsh `magic-enter`-style
+        // binding on Return, an empty-line Enter runs a default command
+        // (`ls` / `git status`) instead of the agent, so the pane filled
+        // with a directory listing and nothing launched. A live restart
+        // never hit this (its shell is long since initialised), which is
+        // why it only showed on fresh creates / dead-session recreates.
+        //
+        // Fix: send the command AND its Enter as one atomic literal — a
+        // trailing carriage return in the same `send-keys -l` chunk. The
+        // two can't desync, so a magic-enter Return can never see an empty
+        // line: the whole `"cmd\r"` is either buffered together (and runs
+        // when the shell becomes ready) or dropped together (no stray
+        // command). We then verify the agent process actually replaced the
+        // shell and re-send if a slow/lossy shell dropped the first one.
+        // Bounded so a genuinely broken command (bad PATH, etc.) can't loop
+        // forever.
+        const LAUNCH_ATTEMPTS: usize = 3;
+        // Command followed by a literal carriage return, sent as one
+        // `-l` chunk so the submit can't be separated from the text.
+        let atomic = format!("{command}\r");
         let mut agent_up = false;
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let cur = self.pane_current_command(session).await;
-            if cur.is_empty() {
-                // Session vanished.
-                return Ok(());
-            }
-            if !is_shell(&cur) {
-                agent_up = true;
-                break;
-            }
-            if Instant::now() >= start_deadline {
+        for attempt in 0..LAUNCH_ATTEMPTS {
+            if attempt > 0 {
                 tracing::warn!(
-                    "restart_in_place: agent didn't appear in pane_current_command on {} \
-                     (still showing shell {}); skipping C-l",
+                    "restart_in_place: agent didn't start on {}; re-sending launch (attempt {}/{})",
                     session,
-                    cur
+                    attempt + 1,
+                    LAUNCH_ATTEMPTS
                 );
+                // Clear any half-entered residue before re-sending.
+                send_keys(vec!["C-u"]).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            let mut literal = self.cmd();
+            literal
+                .arg("send-keys")
+                .arg("-l")
+                .arg("-t")
+                .arg(session)
+                .arg("--")
+                .arg(&atomic);
+            if let Err(e) = literal.output().await {
+                tracing::warn!("restart_in_place send-keys -l to {}: {}", session, e);
+            }
+
+            // Confirm the agent actually started (its process replaces the
+            // shell in pane_current_command). A real launch execs within a
+            // second or two even on a cold machine, so a generous window
+            // reliably separates "still initialising / buffered" from
+            // "genuinely dropped".
+            let start_deadline = Instant::now() + Duration::from_millis(8000);
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let cur = self.pane_current_command(session).await;
+                if cur.is_empty() {
+                    // Session vanished.
+                    return Ok(());
+                }
+                if !is_shell(&cur) {
+                    agent_up = true;
+                    break;
+                }
+                if Instant::now() >= start_deadline {
+                    break;
+                }
+            }
+            if agent_up {
                 break;
             }
+        }
+        if !agent_up {
+            tracing::warn!(
+                "restart_in_place: agent never appeared on {} after {} attempt(s); skipping C-l",
+                session,
+                LAUNCH_ATTEMPTS
+            );
         }
         let _ = at_shell;
 

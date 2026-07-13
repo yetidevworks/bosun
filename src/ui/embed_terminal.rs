@@ -86,7 +86,21 @@ pub enum AttachMode {
 impl AttachMode {
     fn tmux_attach_args(self) -> &'static [&'static str] {
         match self {
-            AttachMode::Preview => &["attach", "-f", "read-only"],
+            // Both modes attach read-write. Preview used to pass
+            // `-f read-only`, but tmux 3.7 made `send-keys` refuse to
+            // target a session whose resolved client is read-only
+            // ("client is read-only"): while a session was only being
+            // previewed, every actor keystroke — the agent launch on a
+            // fresh create / restart, the C-c that stops a running agent,
+            // the redraw C-l — silently failed, so the agent never
+            // started until the user manually attached a read-write
+            // client. The read-only flag was only belt-and-braces anyway:
+            // bosun never forwards sidebar input to the embed unless it's
+            // `Focused` (every `EmbedTerminal::write` call site is gated
+            // on `embed_focused`), and size negotiation works the same
+            // read-write. The Preview/Focused distinction now lives purely
+            // in whether the app forwards the user's keys.
+            AttachMode::Preview => &["attach"],
             AttachMode::Focused => &["attach"],
         }
     }

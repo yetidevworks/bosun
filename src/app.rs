@@ -3435,15 +3435,32 @@ impl App {
             // failed), focus mode has nothing to attach to.
             return;
         }
-        // Flip the focus flag *before* the respawn so `preview_dims`
-        // (called inside `respawn_embed`) returns the shrunk
-        // dimensions that account for the focus border that's about
-        // to appear. If we did this after, the new PTY would be
-        // sized to the full preview rect and the inner app would
-        // wrap lines into the cells the border is about to claim —
-        // the same "Here's → ere's" clipping we're trying to fix.
+        // Flip the focus flag *before* sizing so `preview_dims`
+        // returns the shrunk dimensions that account for the focus
+        // border that's about to appear. If we did this after, the
+        // PTY would be sized to the full preview rect and the inner
+        // app would wrap lines into the cells the border is about to
+        // claim — the same "Here's → ere's" clipping we're trying to
+        // fix.
         self.embed_focused = true;
-        if let Err(e) = self
+        // Preview and Focused now attach with identical (read-write)
+        // args, so there's nothing to respawn on the handoff — just
+        // resize the live embed to the focus dims. Keeping the same
+        // attach + vt100 parser means the preview→focus transition is
+        // a single reflow instead of a drop-and-reattach that blanks
+        // the pane for a frame. Only fall back to a respawn if the
+        // live embed is somehow for a different session.
+        let same_session = self
+            .embed
+            .as_ref()
+            .map(|e| e.session() == session)
+            .unwrap_or(false);
+        if same_session {
+            let (rows, cols) = self.preview_dims();
+            if let Some(embed) = self.embed.as_mut() {
+                embed.resize(rows, cols);
+            }
+        } else if let Err(e) = self
             .respawn_embed(&session, crate::ui::embed_terminal::AttachMode::Focused)
             .await
         {
@@ -3471,7 +3488,20 @@ impl App {
             self.embed = None;
             return;
         };
-        if let Err(e) = self
+        // Mirror of `enter_focus`: the focus border goes away, so just
+        // resize the live embed back up to the full preview dims. No
+        // respawn, no blank frame on the focus→preview handoff.
+        let same_session = self
+            .embed
+            .as_ref()
+            .map(|e| e.session() == session)
+            .unwrap_or(false);
+        if same_session {
+            let (rows, cols) = self.preview_dims();
+            if let Some(embed) = self.embed.as_mut() {
+                embed.resize(rows, cols);
+            }
+        } else if let Err(e) = self
             .respawn_embed(&session, crate::ui::embed_terminal::AttachMode::Preview)
             .await
         {
