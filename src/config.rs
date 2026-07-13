@@ -342,9 +342,7 @@ impl Config {
         // $EDITOR would conflict with the conventional terminal-editor
         // meaning ($EDITOR is usually `vim` / `nvim` — not what a user
         // wants the `e` key to spawn against a project path).
-        let editor = file
-            .editor
-            .and_then(|e| if e.trim().is_empty() { None } else { Some(e) });
+        let editor = file.editor.filter(|e| !e.trim().is_empty());
 
         // Env var wins over config file, both win over the default.
         // Parse failure of either falls through silently to the next
