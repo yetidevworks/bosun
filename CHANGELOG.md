@@ -62,6 +62,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while the new attach repainted). It resizes the live embed in place
   instead — the vt100 grid keeps its content and just reflows around the
   focus border, so the transition is a single seamless repaint.
+- **Fresh agent launches could break the agent's own `PATH` (`command
+  not found`).** The deferred launch (`restart_in_place` on a freshly
+  created pane) opened Phase 1 with an unconditional `C-c` meant to stop
+  a running agent — but a fresh create has no agent, only a login shell
+  that may still be sourcing a heavy `~/.zshrc`. The shell-ready poll
+  couldn't tell "at prompt" from "mid-init" because `pane_current_command`
+  reads `zsh` throughout an rc run, so that `C-c` landed inside `.zshrc`
+  and SIGINTed it partway. Any `PATH` entry appended late in the rc
+  (Kimi's `~/.kimi-code/bin` sits on the very last line) never got added,
+  so the agent binary wasn't found and the pane sat at a bare shell with
+  a `command not found`. Intermittent by nature — it only bit when the
+  interrupt fell inside the rc's slow stretch (compinit, plugin managers),
+  so a brand-new terminal always worked. The launch now passes
+  `kill_first = false`: the interrupting `C-c` fires only for a genuine
+  stop (a live agent), never for typing into a known bare shell. The
+  atomic `cmd\r` already buffers and runs once the prompt is truly ready,
+  so `.zshrc` finishes intact and the agent resolves.
 
 ## [2.0.13] — 2026-07-01
 

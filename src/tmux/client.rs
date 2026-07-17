@@ -115,7 +115,29 @@ pub trait TmuxClient: Send + Sync {
     /// stop (no command, `prep_line = false`) and a later launch
     /// (`prep_line = true`), so the cleanup — whose `Enter` re-runs the
     /// shell prompt's precmd hooks — happens once, at launch, not twice.
-    async fn restart_in_place(&self, session: &str, command: &str, prep_line: bool) -> Result<()>;
+    ///
+    /// `kill_first` controls whether Phase 1 sends the interrupting
+    /// `C-c` to stop a running agent. Set it to `true` only when there
+    /// really is a live agent to kill (the bare *stop* call). The
+    /// deferred *launch* call (`LaunchAgent`) always types into a known
+    /// bare shell — either freshly created or already stopped by the
+    /// restart's stop-half — so it passes `false`: a fresh pane may
+    /// still be sourcing a heavy `~/.zshrc`, and `pane_current_command`
+    /// reads `zsh` throughout that (it *is* zsh running the rc file), so
+    /// the shell-ready poll can't tell "at prompt" from "mid-init". A
+    /// `C-c` fired in that window SIGINTs `.zshrc` partway through,
+    /// leaving PATH half-built (any tool dir appended late in the rc —
+    /// e.g. `~/.kimi-code/bin` on the last line — never gets added), so
+    /// the agent binary then isn't found. Skipping the kill lets the rc
+    /// finish; the atomic `cmd\r` in Phase 3 buffers and runs once the
+    /// prompt is genuinely ready.
+    async fn restart_in_place(
+        &self,
+        session: &str,
+        command: &str,
+        prep_line: bool,
+        kill_first: bool,
+    ) -> Result<()>;
 
     /// Resolve the git work-tree root for `path`. Errors if `path` is
     /// not inside a git repo.
@@ -520,7 +542,13 @@ impl TmuxClient for TokioTmuxClient {
         Ok(())
     }
 
-    async fn restart_in_place(&self, session: &str, command: &str, prep_line: bool) -> Result<()> {
+    async fn restart_in_place(
+        &self,
+        session: &str,
+        command: &str,
+        prep_line: bool,
+        kill_first: bool,
+    ) -> Result<()> {
         // Strategy: poll `#{pane_current_command}` instead of guessing
         // timings with fixed sleeps. The two questions we need answered
         // are "has the old agent actually exited?" and "has the new
@@ -563,7 +591,15 @@ impl TmuxClient for TokioTmuxClient {
         };
 
         // ── Phase 1: kill the running agent, wait for shell ──────────
-        send_keys(vec!["C-c"]).await;
+        // Only send the interrupting C-c when there's actually a live
+        // agent to stop (`kill_first`). The deferred launch path types
+        // into a known bare shell that may still be sourcing a heavy
+        // `~/.zshrc`; a C-c there SIGINTs the rc mid-init and leaves PATH
+        // half-built, so late-appended tool dirs (e.g. `~/.kimi-code/bin`)
+        // go missing and the agent binary isn't found. See the trait doc.
+        if kill_first {
+            send_keys(vec!["C-c"]).await;
+        }
         let kill_deadline = Instant::now() + Duration::from_millis(3500);
         let mut next_cc = Instant::now() + Duration::from_millis(250);
         let mut at_shell = false;
@@ -586,7 +622,7 @@ impl TmuxClient for TokioTmuxClient {
                 );
                 break;
             }
-            if Instant::now() >= next_cc {
+            if kill_first && Instant::now() >= next_cc {
                 send_keys(vec!["C-c"]).await;
                 next_cc = Instant::now() + Duration::from_millis(400);
             }

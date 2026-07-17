@@ -407,7 +407,11 @@ pub fn spawn(
                             // call below is the sole place the prompt's
                             // precmd hooks fire (issue #2; was running a
                             // `git status` precmd twice per restart).
-                            if let Err(e) = client.restart_in_place(&internal, "", false).await {
+                            // kill_first = true: this is the stop-half,
+                            // interrupting a live agent back to a shell.
+                            if let Err(e) =
+                                client.restart_in_place(&internal, "", false, true).await
+                            {
                                 let _ = evt_tx.send(AppMsg::Warn(format!("restart: {}", e)));
                                 continue;
                             }
@@ -466,7 +470,12 @@ pub fn spawn(
                             }
                             // prep_line = true: this call does the single
                             // C-u/Enter/C-u cleanup right before typing.
-                            if let Err(e) = client.restart_in_place(&internal, &command, true).await
+                            // kill_first = false: the pane is a known bare
+                            // shell (fresh-created or already stopped), so
+                            // skip the interrupting C-c that would abort a
+                            // still-sourcing ~/.zshrc and break PATH.
+                            if let Err(e) =
+                                client.restart_in_place(&internal, &command, true, false).await
                             {
                                 let _ = evt_tx.send(AppMsg::Warn(format!("launch: {}", e)));
                                 continue;
