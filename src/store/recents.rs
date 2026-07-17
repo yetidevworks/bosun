@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::params;
 
 use crate::error::Result;
-use crate::events::{ClaudeOptions, ClaudeSessionMode, CodexOptions, SessionSpec, SpecOptions};
+use crate::events::{
+    ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, SessionSpec, SpecOptions,
+};
 
 use super::{map_sql_err, Store};
 
@@ -21,6 +23,7 @@ pub struct Recent {
     pub args: String,
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
+    pub kimi: KimiOptions,
     pub last_used_at: i64,
     pub use_count: i64,
 }
@@ -39,6 +42,7 @@ impl Recent {
             options: SpecOptions {
                 claude: self.claude.clone(),
                 codex: self.codex.clone(),
+                kimi: self.kimi.clone(),
             },
             container_id: None,
             resume: false,
@@ -58,6 +62,8 @@ impl Store {
         let session_mode = claude_mode_to_str(spec.options.claude.session_mode);
         let skip_perms = spec.options.claude.skip_permissions as i64;
         let yolo = spec.options.codex.yolo as i64;
+        let kimi_mode = claude_mode_to_str(spec.options.kimi.session_mode);
+        let kimi_yolo = spec.options.kimi.yolo as i64;
 
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -65,14 +71,17 @@ impl Store {
             INSERT INTO recents (
                 name, path, agent, args,
                 claude_session_mode, claude_skip_permissions, codex_yolo,
+                kimi_session_mode, kimi_yolo,
                 last_used_at, use_count
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
             ON CONFLICT(name, path, agent) DO UPDATE SET
                 args                    = excluded.args,
                 claude_session_mode     = excluded.claude_session_mode,
                 claude_skip_permissions = excluded.claude_skip_permissions,
                 codex_yolo              = excluded.codex_yolo,
+                kimi_session_mode       = excluded.kimi_session_mode,
+                kimi_yolo               = excluded.kimi_yolo,
                 last_used_at            = excluded.last_used_at,
                 use_count               = use_count + 1
             "#,
@@ -84,6 +93,8 @@ impl Store {
                 session_mode,
                 skip_perms,
                 yolo,
+                kimi_mode,
+                kimi_yolo,
                 now,
             ],
         )
@@ -100,6 +111,7 @@ impl Store {
                 SELECT
                     id, name, path, agent, args,
                     claude_session_mode, claude_skip_permissions, codex_yolo,
+                    kimi_session_mode, kimi_yolo,
                     last_used_at, use_count
                 FROM recents
                 ORDER BY last_used_at DESC
@@ -112,6 +124,8 @@ impl Store {
                 let session_mode_str: String = row.get(5)?;
                 let claude_skip: i64 = row.get(6)?;
                 let codex_yolo: i64 = row.get(7)?;
+                let kimi_mode_str: String = row.get(8)?;
+                let kimi_yolo: i64 = row.get(9)?;
                 Ok(Recent {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -125,8 +139,12 @@ impl Store {
                     codex: CodexOptions {
                         yolo: codex_yolo != 0,
                     },
-                    last_used_at: row.get(8)?,
-                    use_count: row.get(9)?,
+                    kimi: KimiOptions {
+                        session_mode: claude_mode_from_str(&kimi_mode_str),
+                        yolo: kimi_yolo != 0,
+                    },
+                    last_used_at: row.get(10)?,
+                    use_count: row.get(11)?,
                 })
             })
             .map_err(map_sql_err)?;
@@ -293,6 +311,18 @@ mod tests {
     }
 
     #[test]
+    fn recent_roundtrip_kimi_options() {
+        let s = Store::in_memory().unwrap();
+        let mut sp = spec("moon", "/srv", "kimi");
+        sp.options.kimi.yolo = true;
+        sp.options.kimi.session_mode = ClaudeSessionMode::Continue;
+        s.upsert_recent(&sp).unwrap();
+        let got = &s.list_recents(1).unwrap()[0];
+        assert!(got.kimi.yolo);
+        assert_eq!(got.kimi.session_mode, ClaudeSessionMode::Continue);
+    }
+
+    #[test]
     fn delete_recent_removes_row() {
         let s = Store::in_memory().unwrap();
         s.upsert_recent(&spec("keep", "/tmp", "claude")).unwrap();
@@ -341,6 +371,7 @@ mod tests {
                 skip_permissions: true,
             },
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             last_used_at: 123,
             use_count: 7,
         };

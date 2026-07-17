@@ -49,6 +49,8 @@ pub struct SessionMetadata {
     pub claude_session_mode: String,
     pub claude_skip_permissions: bool,
     pub codex_yolo: bool,
+    pub kimi_session_mode: String,
+    pub kimi_yolo: bool,
     /// Sidebar container this session belongs to (tabs feature).
     /// `None` when this session is its own row.
     pub container_id: Option<String>,
@@ -325,6 +327,23 @@ impl TmuxClient for TokioTmuxClient {
             )));
         }
 
+        // Step 1b: opt bosun's dedicated tmux server into the csi-u
+        // extended-keys format. Kimi Code warns on startup unless the
+        // server uses csi-u (the default is `xterm`), and modern agents
+        // generally encode modified keys better with it. These are
+        // *global* (`-g`) server options, but they only touch the
+        // `-L bosun` socket (`self.cmd()` carries it), so the user's
+        // default tmux is untouched, and they're harmless for
+        // claude/codex. Best-effort — a failure just means the warning
+        // may reappear. Idempotent, so re-running per create is fine.
+        for (opt, val) in [("extended-keys", "on"), ("extended-keys-format", "csi-u")] {
+            let mut set = self.cmd();
+            set.arg("set-option").arg("-g").arg(opt).arg(val);
+            if let Err(e) = set.output().await {
+                tracing::warn!("set -g {} {}: {}", opt, val, e);
+            }
+        }
+
         // Step 2: set the pretty display name on the freshly-created
         // session via a per-session user option. Best-effort — if
         // this fails, the UI falls back to the internal name.
@@ -448,7 +467,7 @@ impl TmuxClient for TokioTmuxClient {
         // `tmux::parse::LIST_SESSIONS_FORMAT`.
         const SEP: &str = "|||";
         let fmt = format!(
-            "#{{@bosun_display}}{SEP}#{{@bosun_path}}{SEP}#{{@bosun_agent}}{SEP}#{{@bosun_args}}{SEP}#{{@bosun_claude_session_mode}}{SEP}#{{@bosun_claude_skip_permissions}}{SEP}#{{@bosun_codex_yolo}}{SEP}#{{@bosun_container_id}}{SEP}#{{@bosun_worktree_path}}{SEP}#{{@bosun_branch}}",
+            "#{{@bosun_display}}{SEP}#{{@bosun_path}}{SEP}#{{@bosun_agent}}{SEP}#{{@bosun_args}}{SEP}#{{@bosun_claude_session_mode}}{SEP}#{{@bosun_claude_skip_permissions}}{SEP}#{{@bosun_codex_yolo}}{SEP}#{{@bosun_container_id}}{SEP}#{{@bosun_worktree_path}}{SEP}#{{@bosun_branch}}{SEP}#{{@bosun_kimi_session_mode}}{SEP}#{{@bosun_kimi_yolo}}",
             SEP = SEP
         );
         let mut cmd = self.cmd();
@@ -851,6 +870,11 @@ fn metadata_options(m: &SessionMetadata) -> Vec<(&'static str, String)> {
             "@bosun_codex_yolo",
             if m.codex_yolo { "1" } else { "0" }.to_string(),
         ),
+        ("@bosun_kimi_session_mode", m.kimi_session_mode.clone()),
+        (
+            "@bosun_kimi_yolo",
+            if m.kimi_yolo { "1" } else { "0" }.to_string(),
+        ),
     ];
     // Only emit `@bosun_container_id` when a container assignment
     // is requested — leaves pre-feature sessions clean and avoids
@@ -878,18 +902,18 @@ fn metadata_options(m: &SessionMetadata) -> Vec<(&'static str, String)> {
 /// Field order mirrors the read format string in `get_session_metadata`:
 /// `display | path | agent | args | claude_session_mode |
 /// claude_skip_permissions | codex_yolo | container_id | worktree_path |
-/// branch`.
+/// branch | kimi_session_mode | kimi_yolo`.
 fn parse_metadata_line(line: &str, sep: &str) -> Option<SessionMetadata> {
     let parts: Vec<&str> = line.split(sep).collect();
     // Accept the legacy 7-field shape (pre-container_id sessions),
-    // the 8-field shape (container_id added), and the 9/10-field
-    // shapes (worktree_path + branch added) — keeps sessions
-    // created by an older bosun usable after upgrade. Widening this
-    // matters: after appending the two worktree fields to the read
-    // format, metadata-aware sessions emit 9 or 10 fields, so the
-    // old `!= 7 && != 8` guard would reject every session and
-    // silently disable restart/modify.
-    if !matches!(parts.len(), 7..=10) {
+    // the 8-field shape (container_id added), the 9/10-field shapes
+    // (worktree_path + branch added), and the 11/12-field shapes
+    // (kimi_session_mode + kimi_yolo added) — keeps sessions created
+    // by an older bosun usable after upgrade. Widening this matters:
+    // after appending the two kimi fields to the read format,
+    // metadata-aware sessions emit 12 fields, so a narrower guard
+    // would reject every session and silently disable restart/modify.
+    if !matches!(parts.len(), 7..=12) {
         return None;
     }
     // Agent is the required anchor — if it's empty, this session
@@ -922,6 +946,11 @@ fn parse_metadata_line(line: &str, sep: &str) -> Option<SessionMetadata> {
             .get(9)
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty()),
+        kimi_session_mode: match parts.get(10) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "New".to_string(),
+        },
+        kimi_yolo: parts.get(11) == Some(&"1"),
     })
 }
 
@@ -990,6 +1019,30 @@ mod tests {
         assert_eq!(m.container_id.as_deref(), Some("cont1"));
         assert_eq!(m.worktree_path.as_deref(), Some("/srv/.worktrees/feat"));
         assert_eq!(m.branch.as_deref(), Some("feat"));
+    }
+
+    #[test]
+    fn parse_metadata_full_12_field_line_round_trips_kimi() {
+        // display|path|agent|args|mode|skip|yolo|container|worktree|branch|kimi_mode|kimi_yolo
+        let line = [
+            "Moon", "/tmp/m", "kimi", "-m k2.5", "New", "0", "0", "", "", "", "Continue", "1",
+        ]
+        .join(SEP);
+        let m = parse_metadata_line(&line, SEP).expect("kimi metadata parses");
+        assert_eq!(m.agent, "kimi");
+        assert_eq!(m.kimi_session_mode, "Continue");
+        assert!(m.kimi_yolo);
+    }
+
+    #[test]
+    fn parse_metadata_pre_kimi_line_defaults_kimi_fields() {
+        // A session persisted before the kimi columns existed reads
+        // through the new 12-field format as a 10-field line → the two
+        // trailing kimi fields are absent and default to New / false.
+        let line = "My Session|||/tmp/my|||claude|||--model=opus|||Resume|||1|||0|||cont1|||/srv/.worktrees/feat|||feat";
+        let m = parse_metadata_line(line, SEP).expect("metadata parses");
+        assert_eq!(m.kimi_session_mode, "New");
+        assert!(!m.kimi_yolo);
     }
 
     #[test]

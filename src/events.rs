@@ -23,7 +23,7 @@ pub struct SessionSpec {
     pub container_id: Option<String>,
     /// One-shot resume override for this launch only. When true and the
     /// agent supports it, the actor swaps in the resume invocation
-    /// (claude `--continue`, codex `resume --last`) instead of whatever
+    /// (claude/kimi `--continue`, codex `resume --last`) instead of whatever
     /// `options` would otherwise produce. This is the `r` action on the
     /// restart prompt for a dead session being recreated from recents.
     /// It is deliberately NOT persisted — `spec_to_metadata` and the
@@ -54,6 +54,7 @@ pub struct WorktreeSpec {
 pub struct SpecOptions {
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
+    pub kimi: KimiOptions,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -97,6 +98,16 @@ impl ClaudeSessionMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexOptions {
     /// Codex `--yolo` — bypass approvals and sandbox. Dangerous.
+    pub yolo: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KimiOptions {
+    /// New / Continue (`--continue`) / Resume (`--resume`). Kimi's
+    /// session tri-state matches Claude's exactly, so we reuse
+    /// `ClaudeSessionMode` rather than duplicate the enum.
+    pub session_mode: ClaudeSessionMode,
+    /// kimi `--yolo` — auto-approve all actions. Dangerous.
     pub yolo: bool,
 }
 

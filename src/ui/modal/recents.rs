@@ -328,7 +328,7 @@ fn pad_to_width(s: &str, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{ClaudeOptions, CodexOptions, SpecOptions};
+    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions, SpecOptions};
 
     fn rec(name: &str, agent: &str, path: &str) -> Recent {
         Recent {
@@ -339,6 +339,7 @@ mod tests {
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             last_used_at: 0,
             use_count: 1,
         }

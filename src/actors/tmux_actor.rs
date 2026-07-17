@@ -1053,6 +1053,25 @@ fn build_agent_command(agent: &str, options: &SpecOptions, args: &str) -> String
             }
             parts.join(" ")
         }
+        "kimi" => {
+            // Moonshot's Kimi Code agent — the `kimi` binary (not the
+            // legacy `kimi-cli`). `--continue` resumes the working dir's
+            // last session; `--session` with no id opens the interactive
+            // session picker.
+            let mut parts: Vec<String> = vec!["kimi".into()];
+            match options.kimi.session_mode {
+                ClaudeSessionMode::New => {}
+                ClaudeSessionMode::Continue => parts.push("--continue".into()),
+                ClaudeSessionMode::Resume => parts.push("--session".into()),
+            }
+            if options.kimi.yolo {
+                parts.push("--yolo".into());
+            }
+            if !args.is_empty() {
+                parts.push(args.to_string());
+            }
+            parts.join(" ")
+        }
         _ => args.to_string(),
     }
 }
@@ -1085,6 +1104,11 @@ fn build_launch_command(agent: &str, options: &SpecOptions, args: &str, resume: 
                 parts.push(args.to_string());
             }
             parts.join(" ")
+        }
+        "kimi" => {
+            let mut options = options.clone();
+            options.kimi.session_mode = ClaudeSessionMode::Continue;
+            build_agent_command(agent, &options, args)
         }
         _ => build_agent_command(agent, options, args),
     }
@@ -1192,6 +1216,12 @@ fn spec_to_metadata(spec: &SessionSpec) -> SessionMetadata {
         },
         claude_skip_permissions: spec.options.claude.skip_permissions,
         codex_yolo: spec.options.codex.yolo,
+        kimi_session_mode: match spec.options.kimi.session_mode {
+            ClaudeSessionMode::New => "New".to_string(),
+            ClaudeSessionMode::Continue => "Continue".to_string(),
+            ClaudeSessionMode::Resume => "Resume".to_string(),
+        },
+        kimi_yolo: spec.options.kimi.yolo,
         container_id: spec.container_id.clone(),
         // By the time this runs inside `create_session`, `spec.path` has
         // already been repointed to the resolved worktree path (see the
@@ -1220,7 +1250,7 @@ fn resolve_worktree_path(
 /// Inverse of `spec_to_metadata` — rebuild a SessionSpec from the
 /// metadata we read off a live tmux session during restart.
 fn metadata_to_spec(meta: SessionMetadata) -> SessionSpec {
-    use crate::events::{ClaudeOptions, CodexOptions};
+    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions};
     SessionSpec {
         name: meta.display_name,
         path: meta.path,
@@ -1237,6 +1267,14 @@ fn metadata_to_spec(meta: SessionMetadata) -> SessionSpec {
             },
             codex: CodexOptions {
                 yolo: meta.codex_yolo,
+            },
+            kimi: KimiOptions {
+                session_mode: match meta.kimi_session_mode.as_str() {
+                    "Continue" => ClaudeSessionMode::Continue,
+                    "Resume" => ClaudeSessionMode::Resume,
+                    _ => ClaudeSessionMode::New,
+                },
+                yolo: meta.kimi_yolo,
             },
         },
         container_id: meta.container_id,
@@ -1506,7 +1544,7 @@ mod content_hash_tests {
 #[cfg(test)]
 mod build_cmd_tests {
     use super::*;
-    use crate::events::{ClaudeOptions, CodexOptions};
+    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions};
 
     fn opts() -> SpecOptions {
         SpecOptions::default()
@@ -1532,6 +1570,7 @@ mod build_cmd_tests {
                 skip_permissions: true,
             },
             codex: CodexOptions::default(),
+            ..Default::default()
         };
         assert_eq!(
             build_agent_command("claude", &o, ""),
@@ -1547,6 +1586,7 @@ mod build_cmd_tests {
                 ..Default::default()
             },
             codex: CodexOptions::default(),
+            ..Default::default()
         };
         assert_eq!(
             build_agent_command("claude", &o, "--model=opus"),
@@ -1561,6 +1601,55 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(build_agent_command("codex", &o, ""), "codex --yolo");
+    }
+
+    #[test]
+    fn kimi_uses_kimi_binary_and_defaults_bare() {
+        assert_eq!(build_agent_command("kimi", &opts(), ""), "kimi");
+    }
+
+    #[test]
+    fn kimi_continue_and_yolo_combine() {
+        let o = SpecOptions {
+            kimi: KimiOptions {
+                session_mode: ClaudeSessionMode::Continue,
+                yolo: true,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("kimi", &o, "-m k2"),
+            "kimi --continue --yolo -m k2"
+        );
+    }
+
+    #[test]
+    fn kimi_resume_uses_session_flag() {
+        let o = SpecOptions {
+            kimi: KimiOptions {
+                session_mode: ClaudeSessionMode::Resume,
+                yolo: false,
+            },
+            ..Default::default()
+        };
+        assert_eq!(build_agent_command("kimi", &o, ""), "kimi --session");
+    }
+
+    #[test]
+    fn kimi_launch_resume_override_forces_continue() {
+        // The `r` restart action forces `--continue` for kimi without
+        // touching the persisted session mode, mirroring claude.
+        let o = SpecOptions {
+            kimi: KimiOptions {
+                session_mode: ClaudeSessionMode::New,
+                yolo: true,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_launch_command("kimi", &o, "", true),
+            "kimi --continue --yolo"
+        );
     }
 
     #[test]

@@ -14,7 +14,8 @@ use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::events::{
-    ClaudeOptions, ClaudeSessionMode, CodexOptions, Command, SessionSpec, SpecOptions, WorktreeSpec,
+    ClaudeOptions, ClaudeSessionMode, CodexOptions, Command, KimiOptions, SessionSpec, SpecOptions,
+    WorktreeSpec,
 };
 use crate::store::Recent;
 use crate::ui::Theme;
@@ -33,7 +34,7 @@ const DROPDOWN_MAX_VISIBLE: usize = 8;
 
 // --- Agent dropdown --------------------------------------------------
 
-pub const AGENTS: &[&str] = &["claude", "codex", "terminal"];
+pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "terminal"];
 
 // --- Modal state -----------------------------------------------------
 
@@ -50,6 +51,9 @@ enum Field {
     ClaudeSkipPerm,
     // Codex-only
     CodexYolo,
+    // Kimi-only
+    KimiSession,
+    KimiYolo,
 }
 
 impl Field {
@@ -80,6 +84,10 @@ impl Field {
             "codex" => {
                 v.push(Field::CodexYolo);
             }
+            "kimi" => {
+                v.push(Field::KimiSession);
+                v.push(Field::KimiYolo);
+            }
             _ => {}
         }
         v
@@ -104,6 +112,7 @@ pub struct NewSessionModal {
     args: String,
     claude: ClaudeOptions,
     codex: CodexOptions,
+    kimi: KimiOptions,
     field: Field,
     error: Option<String>,
     /// Recents cached at modal construction time, used when the user
@@ -177,6 +186,7 @@ impl NewSessionModal {
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -208,6 +218,7 @@ impl NewSessionModal {
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -243,6 +254,7 @@ impl NewSessionModal {
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -354,6 +366,7 @@ impl NewSessionModal {
         self.args = spec.args;
         self.claude = spec.options.claude;
         self.codex = spec.options.codex;
+        self.kimi = spec.options.kimi;
         if let Some(idx) = AGENTS.iter().position(|a| *a == spec.agent) {
             self.agent_idx = idx;
         }
@@ -447,6 +460,11 @@ impl NewSessionModal {
                     self.codex = r.codex.clone();
                 }
             }
+            "kimi" => {
+                if let Some(r) = self.recents.iter().find(|r| r.agent == "kimi") {
+                    self.kimi = r.kimi.clone();
+                }
+            }
             _ => {}
         }
     }
@@ -482,6 +500,7 @@ impl NewSessionModal {
         match self.agent() {
             "claude" => h += 4, // blank + header + radio + checkbox
             "codex" => h += 3,  // blank + header + checkbox
+            "kimi" => h += 4,   // blank + header + radio + checkbox
             _ => {}
         }
 
@@ -546,6 +565,7 @@ impl NewSessionModal {
             options: SpecOptions {
                 claude: self.claude.clone(),
                 codex: self.codex.clone(),
+                kimi: self.kimi.clone(),
             },
             container_id: self.add_tab_to.clone(),
             resume: false,
@@ -656,6 +676,9 @@ impl Modal for NewSessionModal {
                     Field::ClaudeSession => {
                         self.claude.session_mode = self.claude.session_mode.prev();
                     }
+                    Field::KimiSession => {
+                        self.kimi.session_mode = self.kimi.session_mode.prev();
+                    }
                     _ => {}
                 }
                 ModalResult::Consumed
@@ -668,6 +691,9 @@ impl Modal for NewSessionModal {
                     }
                     Field::ClaudeSession => {
                         self.claude.session_mode = self.claude.session_mode.next();
+                    }
+                    Field::KimiSession => {
+                        self.kimi.session_mode = self.kimi.session_mode.next();
                     }
                     _ => {}
                 }
@@ -750,9 +776,16 @@ impl Modal for NewSessionModal {
                     Field::CodexYolo => {
                         self.codex.yolo = !self.codex.yolo;
                     }
+                    Field::KimiYolo => {
+                        self.kimi.yolo = !self.kimi.yolo;
+                    }
                     Field::ClaudeSession => {
                         // Space on a radio cycles forward, matching Right.
                         self.claude.session_mode = self.claude.session_mode.next();
+                    }
+                    Field::KimiSession => {
+                        // Space on a radio cycles forward, matching Right.
+                        self.kimi.session_mode = self.kimi.session_mode.next();
                     }
                 }
                 ModalResult::Consumed
@@ -926,6 +959,21 @@ impl Modal for NewSessionModal {
                     "YOLO mode (--yolo · bypass approvals & sandbox)",
                     self.codex.yolo,
                     self.field == Field::CodexYolo,
+                    theme,
+                ));
+            }
+            "kimi" => {
+                lines.push(Line::from(""));
+                lines.push(section_header("— Kimi options —", theme));
+                lines.push(session_radio_line(
+                    self.kimi.session_mode,
+                    self.field == Field::KimiSession,
+                    theme,
+                ));
+                lines.push(checkbox_line(
+                    "YOLO mode (--yolo · auto-approve all actions)",
+                    self.kimi.yolo,
+                    self.field == Field::KimiYolo,
                     theme,
                 ));
             }
@@ -1368,6 +1416,41 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycles_fields_for_kimi() {
+        let mut m = modal_for_field_tests();
+        let kimi_idx = AGENTS.iter().position(|a| *a == "kimi").unwrap();
+        m.agent_idx = kimi_idx;
+        assert_eq!(m.agent(), "kimi");
+        m.handle(key(KeyCode::Tab)); // Name -> Path
+        m.handle(key(KeyCode::Tab)); // Path -> Worktree
+        m.handle(key(KeyCode::Tab)); // Worktree -> Agent
+        m.handle(key(KeyCode::Tab)); // Agent -> Args
+        m.handle(key(KeyCode::Tab)); // Args -> KimiSession
+        assert_eq!(m.field, Field::KimiSession);
+        m.handle(key(KeyCode::Tab)); // KimiSession -> KimiYolo
+        assert_eq!(m.field, Field::KimiYolo);
+        // Wraps back to Name.
+        m.handle(key(KeyCode::Tab));
+        assert_eq!(m.field, Field::Name);
+    }
+
+    #[test]
+    fn modal_height_reserves_room_for_kimi_options() {
+        // Regression: kimi must reserve the same 4 option rows as claude
+        // (blank + header + session radio + yolo checkbox), otherwise the
+        // options render below the clipped modal height and vanish.
+        let mut m = modal_for_field_tests();
+        m.agent_idx = AGENTS.iter().position(|a| *a == "claude").unwrap();
+        let claude_h = m.modal_height();
+        m.agent_idx = AGENTS.iter().position(|a| *a == "kimi").unwrap();
+        let kimi_h = m.modal_height();
+        m.agent_idx = AGENTS.iter().position(|a| *a == "terminal").unwrap();
+        let terminal_h = m.modal_height();
+        assert_eq!(kimi_h, claude_h);
+        assert!(kimi_h > terminal_h);
+    }
+
+    #[test]
     fn tab_cycles_fields_for_codex() {
         let mut m = modal_for_field_tests();
         // Switch to codex (second in the list).
@@ -1386,7 +1469,7 @@ mod tests {
     #[test]
     fn tab_cycles_fields_for_terminal() {
         let mut m = modal_for_field_tests();
-        m.agent_idx = 2;
+        m.agent_idx = AGENTS.len() - 1;
         assert_eq!(m.agent(), "terminal");
         m.handle(key(KeyCode::Tab)); // Name -> Path
         m.handle(key(KeyCode::Tab)); // Path -> Worktree
@@ -1630,6 +1713,8 @@ mod tests {
         m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "codex");
         m.handle(key(KeyCode::Right));
+        assert_eq!(m.agent(), "kimi");
+        m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "terminal");
         m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "claude");
@@ -1720,6 +1805,7 @@ mod tests {
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
+            kimi: KimiOptions::default(),
             last_used_at: 0,
             use_count: 1,
         };
@@ -1764,6 +1850,7 @@ mod tests {
             options: SpecOptions {
                 claude: ClaudeOptions::default(),
                 codex: CodexOptions { yolo: true },
+                kimi: KimiOptions::default(),
             },
             container_id: None,
             resume: false,

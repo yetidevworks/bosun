@@ -1414,9 +1414,9 @@ impl AppState {
                     );
                     // Agents that can pick up where they left off get an
                     // extra `r` action that restarts into their resume
-                    // invocation (claude `--continue`, codex `resume
+                    // invocation (claude/kimi `--continue`, codex `resume
                     // --last`) for this one restart only.
-                    if matches!(agent, Some("claude") | Some("codex")) {
+                    if matches!(agent, Some("claude") | Some("codex") | Some("kimi")) {
                         modal = modal.with_alt(
                             'r',
                             "resume",
@@ -1455,11 +1455,11 @@ impl AppState {
                         let mut modal =
                             ConfirmModal::new(title, msg, Command::CreateSession(spec.clone()));
                         // Same one-shot resume action as the live restart:
-                        // claude/codex can be recreated straight into their
-                        // resume invocation. `resume` rides on the spec but
-                        // is never persisted, so the recreated session's
-                        // saved mode is unchanged.
-                        if matches!(agent.as_str(), "claude" | "codex") {
+                        // claude/codex/kimi can be recreated straight into
+                        // their resume invocation. `resume` rides on the
+                        // spec but is never persisted, so the recreated
+                        // session's saved mode is unchanged.
+                        if matches!(agent.as_str(), "claude" | "codex" | "kimi") {
                             let resume_spec = SessionSpec {
                                 resume: true,
                                 ..spec

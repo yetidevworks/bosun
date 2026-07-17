@@ -4,7 +4,26 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.14] — 2026-07-13
+## [2.0.15] — 2026-07-17
+
+### Added
+- **Kimi (Moonshot Kimi Code) is now a first-class agent.** Pick `kimi`
+  in the new-session modal alongside claude / codex / terminal. It gets
+  its own options block: a **session mode** radio (New / Continue /
+  Resume, mapping to `--continue` / `--session`) and a **YOLO mode**
+  checkbox (`--yolo`, auto-approve all actions). The launch command uses
+  the `kimi` binary. Session mode and YOLO are persisted per session
+  (so restart rebuilds the exact invocation) and remembered in recents
+  (so the modal pre-fills from your last kimi session). Dead kimi rows
+  restart with the same one-shot `r` "resume" action as claude/codex,
+  and a dedicated status detector reports Running / Waiting / Idle glyphs
+  for kimi panes.
+- **bosun's tmux server now uses the `csi-u` extended-keys format.** Set
+  globally (`extended-keys on` + `extended-keys-format csi-u`) on the
+  dedicated `-L bosun` socket when a session is created, so Kimi Code
+  stops warning about the default `xterm` format. Scoped to bosun's
+  server — your default tmux is untouched — and harmless for
+  claude/codex.
 
 ### Fixed
 - **New / restarted sessions landed at a bare shell and never launched

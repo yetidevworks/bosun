@@ -10,6 +10,7 @@
 pub mod claude;
 pub mod codex;
 pub mod generic;
+pub mod kimi;
 
 use std::time::{Duration, SystemTime};
 
@@ -85,8 +86,8 @@ pub trait StatusDetector: Send + Sync {
     fn name(&self) -> &'static str;
     fn detect(&self, ctx: &DetectContext<'_>) -> Status;
     /// Higher priority detectors run first. Claude=100, Codex=90,
-    /// user-regex=80, generic=10. A detector returning `Unknown`
-    /// means "I don't know, try the next one".
+    /// Kimi=85, user-regex=80, generic=10. A detector returning
+    /// `Unknown` means "I don't know, try the next one".
     fn priority(&self) -> u8;
 }
 
@@ -112,11 +113,12 @@ impl DetectorRegistry {
         self
     }
 
-    /// Build the default registry: claude + codex + generic.
+    /// Build the default registry: claude + codex + kimi + generic.
     pub fn default_stack() -> Self {
         Self::new()
             .register(Box::new(claude::ClaudeDetector))
             .register(Box::new(codex::CodexDetector))
+            .register(Box::new(kimi::KimiDetector))
             .register(Box::new(generic::GenericDetector))
     }
 
