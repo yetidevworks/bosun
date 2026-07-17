@@ -123,6 +123,8 @@ async fn worktree_add_and_options_round_trip_through_list_sessions() {
         claude_session_mode: "New".into(),
         claude_skip_permissions: false,
         codex_yolo: false,
+        kimi_session_mode: "New".into(),
+        kimi_yolo: false,
         container_id: None,
         worktree_path: Some(wt_str.into()),
         branch: Some("feat".into()),

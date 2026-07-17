@@ -142,6 +142,8 @@ async fn metadata_round_trips_through_tmux_options() {
         claude_session_mode: "Resume".into(),
         claude_skip_permissions: true,
         codex_yolo: false,
+        kimi_session_mode: "New".into(),
+        kimi_yolo: false,
         container_id: None,
         worktree_path: Some("/tmp/.worktrees/feat".into()),
         branch: Some("feat".into()),
