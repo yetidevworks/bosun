@@ -45,7 +45,7 @@ mod tests {
     fn ctx_with_age(secs: u64) -> DetectContext<'static> {
         let now = SystemTime::now();
         let ago = now - Duration::from_secs(secs);
-        DetectContext::from_parts(b"", "", Some(ago), now, None, "s")
+        DetectContext::from_parts(b"", "", Some(ago), now, None, "s", None, None)
     }
 
     #[test]

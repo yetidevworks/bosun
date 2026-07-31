@@ -818,6 +818,8 @@ pub fn spawn(
                                     now,
                                     prev,
                                     &s.name,
+                                    s.pane_title.as_deref(),
+                                    s.pane_command.as_deref(),
                                 );
                                 let detected = registry.detect(&ctx);
                                 let smoothed = smoothers
@@ -1430,7 +1432,16 @@ async fn refresh_all(
 
         let plain = crate::tmux::detector::strip_ansi(&ansi);
         let prev = smoothers.get(&s.name).map(|sm| sm.current());
-        let ctx = DetectContext::from_parts(&ansi, &plain, s.last_activity, now, prev, &s.name);
+        let ctx = DetectContext::from_parts(
+            &ansi,
+            &plain,
+            s.last_activity,
+            now,
+            prev,
+            &s.name,
+            s.pane_title.as_deref(),
+            s.pane_command.as_deref(),
+        );
         let detected = registry.detect(&ctx);
         let smoothed = smoothers
             .entry(s.name.clone())
@@ -1480,11 +1491,12 @@ async fn refresh_all(
 /// - `capture_pane` already passes `-J`, which rejoins lines tmux
 ///   wrapped to the pane width, so a width change doesn't re-split a
 ///   long line into a different number of pieces.
-/// - here we trim each line's trailing whitespace (tmux pads to the
-///   pane width) and drop blank lines entirely, so trailing-space
-///   padding and vertical blank-row differences don't perturb it — this
-///   also covers an idle pane whose only "change" is cursor parking on
-///   a blank row.
+/// - [`normalize_line`] strips the parts of an agent TUI that animate
+///   on their own — spinner glyphs and elapsed-time counters — and
+///   collapses whitespace runs, so idle chrome doesn't read as output.
+/// - blank lines are dropped entirely, so vertical blank-row
+///   differences don't perturb it — this also covers an idle pane whose
+///   only "change" is the cursor parking on a blank row.
 ///
 /// Returns `0` for empty/whitespace-only text (a failed or blank
 /// capture) so the app treats it as "no information" rather than a
@@ -1493,19 +1505,96 @@ fn content_hash(plain: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let mut any = false;
+    let mut buf = String::new();
     for line in plain.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
+        buf.clear();
+        normalize_line(line, &mut buf);
+        if buf.is_empty() {
             continue;
         }
         any = true;
-        trimmed.hash(&mut h);
+        buf.hash(&mut h);
         0u8.hash(&mut h); // unambiguous separator between lines
     }
     if !any {
         return 0;
     }
     h.finish()
+}
+
+/// Characters agent TUIs animate purely as decoration: Claude's
+/// rotating star set (U+2722..U+273F — `✢ ✳ ✶ ✻ ✽` …), the braille
+/// spinner frames, and the bullets used in their place. None of them
+/// carry meaning, and Claude cycles them several times a second — on
+/// the backgrounded-task list, one such glyph was the *only* difference
+/// between consecutive captures, which made the unread dot strobe on
+/// and off as the hash wandered back onto its own baseline.
+fn is_spinner_glyph(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2722}'..='\u{273f}' | '\u{2217}' | '\u{2219}' | '\u{00b7}'
+    ) || crate::tmux::detector::is_braille(c)
+}
+
+/// Normalize one captured line for hashing, appending to `out`.
+///
+/// Drops spinner glyphs, masks elapsed-time and token counters (`3m`,
+/// `1.2k`, `22d` — these tick on their own and a timestamp ageing from
+/// `3m` to `4m` is emphatically not new output), and collapses
+/// whitespace runs to a single space so tmux's column padding and the
+/// shifting alignment around a removed glyph don't perturb the result.
+/// The output is trimmed, so a line that was pure decoration comes back
+/// empty and is skipped by the caller.
+fn normalize_line(line: &str, out: &mut String) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut pending_space = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() || is_spinner_glyph(c) {
+            // Collapse to at most one space, and only once we know real
+            // content follows — that keeps `✢ Ensure…` and `· Ensure…`
+            // and a bare `  Ensure…` all normalizing identically.
+            pending_space = !out.is_empty();
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_digit() {
+            // Scan the numeric run, allowing interior decimal points.
+            let start = i;
+            let mut j = i;
+            while j < chars.len()
+                && (chars[j].is_ascii_digit()
+                    || (chars[j] == '.' && chars.get(j + 1).is_some_and(char::is_ascii_digit)))
+            {
+                j += 1;
+            }
+            // A duration/count suffix only counts when it stands alone —
+            // `3m` and `1.2k` are counters, `3days` and `2_1_220` are not.
+            let is_counter = chars
+                .get(j)
+                .is_some_and(|u| matches!(u, 's' | 'm' | 'h' | 'd' | 'k'))
+                && !chars.get(j + 1).is_some_and(|n| n.is_alphanumeric());
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            if is_counter {
+                out.push('#');
+                i = j + 1;
+            } else {
+                out.extend(&chars[start..j]);
+                i = j;
+            }
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+        i += 1;
+    }
 }
 
 #[cfg(test)]
@@ -1547,6 +1636,78 @@ mod content_hash_tests {
         // the separator keeps these distinct so we don't collide real
         // text differences.
         assert_ne!(content_hash("ab"), content_hash("a\nb"));
+    }
+
+    #[test]
+    fn rotating_spinner_glyph_does_not_change_hash() {
+        // The reported bug, verbatim. Claude's backgrounded task list
+        // cycles this glyph roughly twice a second; sampled at 1Hz the
+        // hash used to walk over six values — one of which was the
+        // user's own baseline — so the unread dot strobed on and off.
+        // Every frame must fingerprint identically.
+        let frame = |g: &str| {
+            content_hash(&format!(
+                "{g} Ensure forum-pro CSS works with default…  i'm pretty close …\n\
+                 ❯ describe a task for a new session"
+            ))
+        };
+        let base = frame("✢");
+        for g in ["✽", "✳", "✻", "✶", "·", "∙", "∗", "⠋", "⠙"] {
+            assert_eq!(base, frame(g), "spinner frame {g} perturbed the hash");
+        }
+        assert_ne!(base, 0);
+    }
+
+    #[test]
+    fn elapsed_time_counters_do_not_change_hash() {
+        // Relative timestamps in the task list tick over on their own.
+        // A row ageing from 3m to 4m is not new output.
+        let a = content_hash("Redesign Trilby landing page   Pre-upgrade bot traffic   3m");
+        let b = content_hash("Redesign Trilby landing page   Pre-upgrade bot traffic   4m");
+        assert_eq!(a, b);
+        // Same for the working line's elapsed + token counters.
+        assert_eq!(
+            content_hash("✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)"),
+            content_hash("✽ Thinking… (47s · ↑ 3.8k tokens · esc to interrupt)")
+        );
+    }
+
+    #[test]
+    fn real_text_changes_still_register_through_normalization() {
+        // The normalizer must not be so aggressive that genuine output
+        // stops registering — that would break unread entirely.
+        assert_ne!(
+            content_hash("✳ Investigate GitHub issue 13   4d"),
+            content_hash("✳ Investigate GitHub issue 14   4d")
+        );
+        // A digit that isn't a counter is still content.
+        assert_ne!(content_hash("issue #4194"), content_hash("issue #4195"));
+        // And a whole new line is a change even if every existing line
+        // normalized identically.
+        assert_ne!(
+            content_hash("✻ Working on it"),
+            content_hash("✻ Working on it\nDone — 3 files changed")
+        );
+    }
+
+    #[test]
+    fn counter_suffix_must_stand_alone() {
+        // `3days` and Claude's `2_1_220` process string are not counters
+        // and must survive verbatim, or unrelated text would collide.
+        assert_ne!(content_hash("waited 3days"), content_hash("waited 9days"));
+        assert_ne!(content_hash("v2_1_220"), content_hash("v2_1_221"));
+    }
+
+    #[test]
+    fn glyph_removal_does_not_disturb_alignment() {
+        // Dropping a glyph shifts everything after it. Whitespace runs
+        // collapse so a row with a spinner, a row with a bullet, and a
+        // row with neither all fingerprint the same.
+        let a = content_hash("✻ Review GitHub triage advisories");
+        let b = content_hash("·  Review GitHub triage advisories");
+        let c = content_hash("   Review   GitHub triage advisories");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
     }
 }
 

@@ -4,6 +4,60 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.16] — 2026-07-31
+
+### Added
+- **A new `◆ Done` status.** A session that finished a turn you haven't
+  read yet now renders distinctly from one that's merely sitting at an
+  empty composer — "ready for review" versus "nothing pending". It
+  drops back to `○ Idle` the moment you select the row. Running and
+  Waiting still win, so a session asking a question never hides behind
+  it. Every built-in theme gets a `status_done` colour; user themes
+  that predate the key keep loading and fall back to the accent.
+- **The `?` help dialog now opens with a legend.** Two new sections
+  ahead of the key bindings: every status glyph with what it means, and
+  every row marker (unread dot, selection bar, tab count, background
+  activity, attached tag). Glyphs are drawn in the colour they actually
+  appear in on the session list. The dialog is retitled
+  "Bosun · Reference" now that it's more than key bindings.
+- **Status detection reads what the agent says about itself.**
+  `list-sessions` now also pulls `#{pane_title}` and
+  `#{pane_current_command}`. Claude Code publishes its state in the
+  pane title (a braille spinner frame while a turn runs, `✳` when it
+  doesn't) and renames its process to its own version (`2_1_220`), so
+  both are far steadier signals than scraping pane text. Bosun prefers
+  them and keeps the old heuristics as fallback. Costs nothing — the
+  fields ride the poll we already do.
+
+### Fixed
+- **The unread dot strobed on and off on an idle session.** Two
+  independent bugs, both visible on a Claude session showing the
+  backgrounded-task list:
+  - The dot was recomputed live each tick by comparing the pane's
+    fingerprint against the baseline, so it *cleared itself* whenever
+    the pane happened to return to exactly the baseline text. Whether
+    something has happened since you looked is a question about
+    history, so it's now latched — set on the first change and cleared
+    only by viewing the row (or by a reflow re-baseline).
+  - The fingerprint covered animated decoration. Claude cycles a
+    spinner glyph (`✢ ✽ ✳ ✻ ✶ ·`) about twice a second and ages
+    relative timestamps (`3m` → `4m`); sampled at 1Hz the hash
+    random-walked over a handful of values, one of which was the
+    baseline. Spinner glyphs, elapsed-time counters, and whitespace
+    runs are now normalised out before hashing. Replaying the real
+    captures that caused the report: 12 frames that produced 6
+    distinct fingerprints now produce 1.
+- **A session showing Claude's backgrounded-task list no longer picks
+  up other sessions' state.** That screen lists tasks from every
+  session, spinners and all; the detector now keys off this pane's own
+  title instead, and recognises the screen as Claude via the process
+  name (it has none of the usual prompt-box anchors).
+- **The git unit tests no longer fail at random.** Their throwaway
+  fixture repos inherited a global `commit.gpgsign = true` and dragged
+  gpg-agent into every fixture commit, so the suite failed
+  intermittently on whichever test ran when the agent was unhappy.
+  Signing is now forced off for those repos.
+
 ## [2.0.15] — 2026-07-17
 
 ### Added

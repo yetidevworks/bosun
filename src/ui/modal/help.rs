@@ -24,11 +24,29 @@ const MODAL_MIN_HEIGHT: u16 = 14;
 const KEY_COL_WIDTH: usize = 22;
 
 /// One logical row in the help body. Section headers visually break
-/// up the table; bindings are key/action pairs; blanks add spacing.
+/// up the table; bindings are key/action pairs; legend rows are the
+/// same but draw their glyph in the colour it actually appears in on
+/// the session list (a legend printed in plain text would be missing
+/// half the information it exists to convey); blanks add spacing.
 enum Row {
     Section(&'static str),
     Binding(&'static str, &'static str),
+    Legend(&'static str, Tint, &'static str),
     Blank,
+}
+
+/// Which theme colour a legend glyph is drawn in. Mirrors the choices
+/// made in `ui::session_list` so the legend can't drift from the rows
+/// it describes.
+enum Tint {
+    /// Same colour the status column uses for this state.
+    Status(crate::tmux::detector::Status),
+    /// The unread notification dot.
+    Unread,
+    /// Selection bar and background-activity dot.
+    Accent,
+    /// Muted chrome — tab counts, the attached tag.
+    Muted,
 }
 
 pub struct HelpModal {
@@ -185,7 +203,7 @@ impl Modal for HelpModal {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(viewport + 2);
         lines.push(Line::from(vec![
             Span::styled(
-                "Bosun · Key Bindings",
+                "Bosun · Reference",
                 Style::default()
                     .fg(theme.text)
                     .bg(body_bg)
@@ -239,13 +257,88 @@ fn render_row(row: &Row, theme: &Theme, bg: ratatui::style::Color) -> Line<'stat
                 ),
             ])
         }
+        Row::Legend(glyph, tint, meaning) => {
+            let color = match tint {
+                Tint::Status(s) => crate::ui::session_list::status_color(*s, theme),
+                Tint::Unread => theme.status_error,
+                Tint::Accent => theme.accent,
+                Tint::Muted => theme.text_muted,
+            };
+            // Glyph in its real colour, then the label that names the
+            // state, padded to the same column the bindings use.
+            let label = format!("  {}", glyph);
+            let mut name_padded = String::new();
+            while label.chars().count() + name_padded.chars().count() < KEY_COL_WIDTH {
+                name_padded.push(' ');
+            }
+            Line::from(vec![
+                Span::styled(label, Style::default().fg(color).bg(bg)),
+                Span::styled(name_padded, Style::default().bg(bg)),
+                Span::styled(
+                    (*meaning).to_string(),
+                    Style::default().fg(theme.text_muted).bg(bg),
+                ),
+            ])
+        }
         Row::Blank => Line::from(""),
     }
 }
 
 fn build_rows() -> Vec<Row> {
+    use crate::tmux::detector::Status as S;
     use Row::*;
     vec![
+        // Legend first: the glyphs are on screen the whole time and
+        // are the one part of the UI you can't discover by pressing a
+        // key. `Binding` doubles as the layout for it — glyph in the
+        // left column, meaning on the right.
+        Section("Status glyphs"),
+        Legend(
+            "●  Running",
+            Tint::Status(S::Running),
+            "Agent is working on a turn right now",
+        ),
+        Legend(
+            "◐  Waiting",
+            Tint::Status(S::Waiting),
+            "Agent is blocked on you — a prompt or a confirmation",
+        ),
+        Legend(
+            "◆  Done",
+            Tint::Status(S::Done),
+            "Finished a turn you haven't looked at yet",
+        ),
+        Legend(
+            "○  Idle",
+            Tint::Status(S::Idle),
+            "Up, nothing pending — empty composer or a shell",
+        ),
+        Legend(
+            "✕  Error",
+            Tint::Status(S::Error),
+            "Agent exited or the session errored out",
+        ),
+        Legend(
+            "⟳  Working",
+            Tint::Status(S::Waiting),
+            "Bosun itself is busy — killing, restarting, creating",
+        ),
+        Blank,
+        Section("Row markers"),
+        Legend(
+            "● gutter",
+            Tint::Unread,
+            "Unread — the pane changed since you last looked",
+        ),
+        Legend("▌ gutter", Tint::Accent, "The selected row"),
+        Legend("● after (N)", Tint::Accent, "A background tab is busy"),
+        Legend("(N)", Tint::Muted, "Tab count for a multi-tab container"),
+        Legend(
+            "•attached",
+            Tint::Status(S::Running),
+            "A terminal is attached to this session",
+        ),
+        Blank,
         Section("Navigation"),
         Binding("↑ ↓ / k j", "Move selection"),
         Binding("Enter", "Attach to selected session"),

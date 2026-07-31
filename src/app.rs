@@ -20,6 +20,7 @@ use crate::events::{AppMsg, Command, SessionSpec};
 use crate::sidebar::{Location, SidebarModel, VisibleKind};
 use crate::store::{Recent, Store};
 use crate::tmux::attach::attach_with_ctrl_q_detach;
+use crate::tmux::detector::Status;
 use crate::tmux::session::SessionView;
 use crate::tmux::TmuxClient;
 use crate::ui;
@@ -248,6 +249,25 @@ pub struct SeenState {
     /// the post-reflow redraw settling rather than new output. Set when
     /// a width change is detected; counts down to 0.
     pub settle: u8,
+    /// Latched: the pane has changed at least once since the user last
+    /// looked at this row.
+    ///
+    /// This has to be sticky rather than recomputed per tick. Comparing
+    /// live (`seen.hash != current`) means the dot silently clears
+    /// itself whenever the pane happens to return to *exactly* the
+    /// baseline text — which is not hypothetical: an agent cycling a
+    /// spinner through a handful of frames walks back onto its own
+    /// baseline every few polls, strobing the dot on and off. "Has
+    /// something happened since I looked?" is a question about history,
+    /// so it's answered from a latch and cleared only by looking
+    /// (`sync_focus`) or by a reflow re-baseline.
+    pub unread: bool,
+    /// Latched: this session was observed Running since the user last
+    /// looked at it. Paired with `unread` to promote an otherwise-Idle
+    /// row to [`Status::Done`] — a turn that finished and hasn't been
+    /// read. Without it, a session that merely redrew (and never did
+    /// any work) would claim to have results waiting.
+    pub ran: bool,
 }
 
 /// Number of wheel events that must accumulate in one direction before
@@ -716,21 +736,33 @@ impl AppState {
     /// Whether `name`'s row has unviewed changes — its current pane
     /// content differs from what the user last saw (the baseline in
     /// [`AppState::seen_content`]). Drives the sidebar's unread dot.
-    /// `false` when the session is unknown, when its capture this tick
-    /// was empty/failed (`content_hash == 0`), or when it hasn't been
-    /// baselined yet. The currently-viewed row is kept baselined by
-    /// `sync_focus`, so it never reads as unread.
+    /// `false` when the session is unknown or hasn't been baselined
+    /// yet. The currently-viewed row is cleared by `sync_focus`, so it
+    /// never reads as unread.
+    ///
+    /// Reads the latch rather than re-deriving the comparison — see
+    /// [`SeenState::unread`] for why that distinction matters.
     pub fn session_unread(&self, name: &str) -> bool {
-        let cur = match self.session_by_name(name) {
-            Some(v) => v.content_hash,
-            None => return false,
-        };
-        if cur == 0 {
-            return false;
-        }
-        match self.seen_content.get(name) {
-            Some(seen) => seen.hash != cur,
-            None => false,
+        self.seen_content.get(name).is_some_and(|s| s.unread)
+    }
+
+    /// The status to actually render for `view`, which is the detected
+    /// status plus one thing only the app knows: whether the user has
+    /// looked at the row.
+    ///
+    /// A detector can't tell a finished turn from a session sitting at
+    /// an empty composer — both are a quiet pane with a prompt box. The
+    /// difference is history: did this session *do* something you
+    /// haven't read? So an Idle row that ran and went unread since you
+    /// last looked renders as [`Status::Done`] ("ready for review"),
+    /// and drops back to Idle the moment you select it.
+    pub fn display_status(&self, view: &SessionView) -> Status {
+        match view.status {
+            Status::Idle => match self.seen_content.get(view.name()) {
+                Some(s) if s.unread && s.ran => Status::Done,
+                _ => Status::Idle,
+            },
+            other => other,
         }
     }
 
@@ -823,16 +855,26 @@ impl AppState {
                 //   one instance's resize from lighting up unread in
                 //   another, and a device switch from lighting up
                 //   everything.
-                // * Otherwise leave the baseline be, so a change since
-                //   the user last looked stays unread until they select
-                //   the row — `sync_focus` re-baselines the selected row,
-                //   which is what clears the dot.
+                // * Otherwise, a differing hash latches `unread` — and
+                //   the latch is what the dot reads. It stays set until
+                //   the user selects the row (`sync_focus` clears it),
+                //   even if the pane later wanders back onto the exact
+                //   baseline text. See [`SeenState::unread`].
                 //
                 // A 0 hash (empty/failed capture) is no information and
                 // never baselines or trips unread. Dead sessions are
                 // pruned. Rides the existing 1Hz refresh; no extra exec.
                 for v in &self.sessions {
+                    // Independent of content: remember that this row did
+                    // work while unattended, so a finished turn can be
+                    // told from a session that merely redrew.
+                    let ran_now = v.status == Status::Running;
                     if v.content_hash == 0 {
+                        if ran_now {
+                            if let Some(seen) = self.seen_content.get_mut(v.name()) {
+                                seen.ran = true;
+                            }
+                        }
                         continue;
                     }
                     match self.seen_content.get_mut(v.name()) {
@@ -843,6 +885,8 @@ impl AppState {
                                     hash: v.content_hash,
                                     width: v.width(),
                                     settle: 0,
+                                    unread: false,
+                                    ran: ran_now,
                                 },
                             );
                         }
@@ -850,12 +894,17 @@ impl AppState {
                             seen.hash = v.content_hash;
                             seen.width = v.width();
                             seen.settle = REFLOW_SETTLE_TICKS;
+                            seen.ran |= ran_now;
                         }
                         Some(seen) if seen.settle > 0 => {
                             seen.hash = v.content_hash;
                             seen.settle -= 1;
+                            seen.ran |= ran_now;
                         }
-                        Some(_) => {}
+                        Some(seen) => {
+                            seen.unread |= seen.hash != v.content_hash;
+                            seen.ran |= ran_now;
+                        }
                     }
                 }
                 self.seen_content
@@ -965,9 +1014,18 @@ impl AppState {
                 // reconcile or statusbar work. A no-op if the named
                 // session was killed between detect and delivery.
                 // Unread is tracked from pane content on the 1Hz
-                // refresh, not from status, so nothing to do here.
+                // refresh, not from status. The one thing status does
+                // feed is the `ran` latch behind the Done state — the
+                // fast tick is often where a turn's Running window is
+                // first (and sometimes only) seen, so recording it here
+                // too keeps a short burst from being missed entirely.
                 if let Some(view) = self.sessions.iter_mut().find(|v| v.name() == name) {
                     view.status = status;
+                }
+                if status == Status::Running {
+                    if let Some(seen) = self.seen_content.get_mut(&name) {
+                        seen.ran = true;
+                    }
                 }
             }
             AppMsg::EmbedBytes { .. } => {
@@ -1147,9 +1205,10 @@ impl AppState {
         if let Some((name, hash, width)) = &current {
             // Landing the cursor on a session counts as viewing it —
             // in single-window mode the embed shows it live the moment
-            // it's selected — so re-baseline its content to "now."
-            // That clears the unread dot and means only changes the
-            // user hasn't seen since this moment count going forward.
+            // it's selected — so re-baseline its content to "now" and
+            // drop both latches. That clears the unread dot and the
+            // Done glyph, and means only changes the user hasn't seen
+            // since this moment count going forward.
             // A 0 hash (no capture yet) leaves the prior baseline be.
             if *hash != 0 {
                 self.seen_content.insert(
@@ -1158,6 +1217,8 @@ impl AppState {
                         hash: *hash,
                         width: *width,
                         settle: 0,
+                        unread: false,
+                        ran: false,
                     },
                 );
             }
@@ -3759,6 +3820,8 @@ mod tests {
                 // Stable default so the unread tests exercise pure
                 // content change; width-change tests use `ses_hw`.
                 pane_width: 80,
+                pane_title: None,
+                pane_command: None,
             },
             status,
             None,
@@ -4124,6 +4187,98 @@ mod tests {
         s.apply(AppMsg::Key(key(KeyCode::Up)));
         s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 9)]));
         assert!(s.session_unread("b"));
+    }
+
+    /// A session carrying a content hash *and* a status, for the
+    /// latch / Done tests.
+    fn ses_hs(name: &str, hash: u64, status: Status) -> SessionView {
+        let mut v = ses_status(name, status);
+        v.content_hash = hash;
+        v
+    }
+
+    #[test]
+    fn unread_survives_content_returning_to_baseline() {
+        // The strobe bug. An agent animating a spinner walks its pane
+        // text back onto the exact baseline every few polls. Unread
+        // asks "has anything happened since I looked", which history
+        // answers — so once set it must stay set even when the current
+        // frame happens to match again.
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        // "b" changes while the cursor sits on "a".
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 2)]));
+        assert!(s.session_unread("b"));
+        // …and the very next poll lands back on the baseline text.
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        assert!(
+            s.session_unread("b"),
+            "unread cleared itself when the pane wandered back to its baseline"
+        );
+        // Only looking at it clears the dot.
+        s.apply(AppMsg::Key(key(KeyCode::Down)));
+        assert!(!s.session_unread("b"));
+    }
+
+    #[test]
+    fn finished_turn_reads_as_done() {
+        // Ran while unattended, then went quiet with unread output →
+        // "ready for review", not plain Idle.
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        s.apply(refreshed(vec![
+            ses_h("a", 1),
+            ses_hs("b", 2, Status::Running),
+        ]));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hs("b", 3, Status::Idle)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Done);
+    }
+
+    #[test]
+    fn viewing_a_done_session_returns_it_to_idle() {
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        s.apply(refreshed(vec![
+            ses_h("a", 1),
+            ses_hs("b", 2, Status::Running),
+        ]));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hs("b", 3, Status::Idle)]));
+        // Cursor onto "b" — that's reviewing it.
+        s.apply(AppMsg::Key(key(KeyCode::Down)));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Idle);
+    }
+
+    #[test]
+    fn unread_without_running_is_not_done() {
+        // A row that only ever redrew has no results waiting. It's
+        // unread (something changed) but not Done (nothing ran).
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 2)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert!(s.session_unread("b"));
+        assert_eq!(s.display_status(&b), Status::Idle);
+    }
+
+    #[test]
+    fn done_never_masks_an_active_state() {
+        // Running and Waiting are about right now and outrank the
+        // review latch — a session asking a question must show the
+        // Waiting glyph even though it also ran and went unread.
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        s.apply(refreshed(vec![
+            ses_h("a", 1),
+            ses_hs("b", 2, Status::Running),
+        ]));
+        s.apply(refreshed(vec![
+            ses_h("a", 1),
+            ses_hs("b", 3, Status::Waiting),
+        ]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Waiting);
     }
 
     #[test]

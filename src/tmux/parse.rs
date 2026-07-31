@@ -27,7 +27,17 @@ use crate::tmux::session::TmuxSession;
 ///
 /// All six are empty strings for non-bosun sessions and get parsed as
 /// `None` so the UI renders them only when available.
-pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}";
+///
+/// The final two fields are tmux's own view of the active pane, and are
+/// what the status detectors prefer over scraping the pane body:
+/// - `pane_title`           — the OSC title the app set. Claude Code writes
+///   `<glyph> <task>`, braille while working and `✳` when not, and only
+///   rewrites it on a state change — so unlike the pane body it doesn't
+///   churn frame-by-frame.
+/// - `pane_current_command` — the running process. Claude Code renames
+///   itself to its version (`2_1_220`), so this separates a live agent
+///   from a bare `zsh`.
+pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}";
 
 const FIELD_SEP: &str = "|||";
 
@@ -89,6 +99,12 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
     // so a layout change doesn't read as unread. Optional trailing
     // field: older outputs and terse test fixtures omit it → 0.
     let pane_width_raw = parts.next();
+    // Pane title + running command. Both are first-party state signals
+    // the agent TUI publishes about itself, far steadier than scraping
+    // the pane body. Optional trailing fields for the same back-compat
+    // reasons as the fields above.
+    let pane_title_raw = parts.next().map(|s| s.to_string());
+    let pane_command_raw = parts.next().map(|s| s.to_string());
 
     if parts.next().is_some() {
         return Err("unexpected extra field".into());
@@ -123,6 +139,8 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
         worktree_path: worktree_path_raw.filter(|s| !s.is_empty()),
         branch: branch_raw.filter(|s| !s.is_empty()),
         pane_width,
+        pane_title: pane_title_raw.filter(|s| !s.is_empty()),
+        pane_command: pane_command_raw.filter(|s| !s.is_empty()),
     })
 }
 
@@ -173,6 +191,47 @@ mod tests {
         let line = "main|||1|||1|||1712000000|||1712003600|||/tmp";
         let s = &parse_list_sessions(line).unwrap()[0];
         assert_eq!(s.pane_width, 0);
+    }
+
+    #[test]
+    fn parses_pane_title_and_command() {
+        // A real line off `tmux -L bosun list-sessions`, spinner glyph
+        // and all — the title is what the Claude detector reads to
+        // decide Running vs Idle.
+        let line = concat!(
+            "main|||1|||1|||1712000000|||1712003600|||/tmp|||Main|||claude|||/tmp|||cid|||/wt|||br",
+            "|||95|||⠐ Ensure forum-pro CSS works|||2_1_220"
+        );
+        let s = &parse_list_sessions(line).unwrap()[0];
+        assert_eq!(s.pane_width, 95);
+        assert_eq!(
+            s.pane_title.as_deref(),
+            Some("⠐ Ensure forum-pro CSS works")
+        );
+        assert_eq!(s.pane_command.as_deref(), Some("2_1_220"));
+    }
+
+    #[test]
+    fn missing_pane_title_and_command_default_to_none() {
+        // Back-compat: terse fixtures stop at pane_width.
+        let line =
+            "main|||1|||1|||1712000000|||1712003600|||/tmp|||Main|||claude|||/tmp|||cid|||/wt|||br|||95";
+        let s = &parse_list_sessions(line).unwrap()[0];
+        assert_eq!(s.pane_title, None);
+        assert_eq!(s.pane_command, None);
+    }
+
+    #[test]
+    fn empty_pane_title_is_none_not_blank() {
+        // A pane that never set a title yields an empty field; that's
+        // "unknown", not a title of "".
+        let line = concat!(
+            "main|||1|||1|||1712000000|||1712003600|||/tmp|||Main|||claude|||/tmp|||cid|||/wt|||br",
+            "|||95||||||zsh"
+        );
+        let s = &parse_list_sessions(line).unwrap()[0];
+        assert_eq!(s.pane_title, None);
+        assert_eq!(s.pane_command.as_deref(), Some("zsh"));
     }
 
     #[test]

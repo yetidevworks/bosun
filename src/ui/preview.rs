@@ -67,6 +67,13 @@ pub fn render(
                     .iter()
                     .map(|m| state.session_by_name(m))
                     .collect();
+                let tab_statuses: Vec<crate::tmux::detector::Status> = tab_views
+                    .iter()
+                    .map(|v| match v {
+                        Some(view) => state.display_status(view),
+                        None => crate::tmux::detector::Status::Unknown,
+                    })
+                    .collect();
                 // Prefix the pills with the section name only when the
                 // user opted in and the container actually lives in a
                 // section (ungrouped rows stay bare).
@@ -83,6 +90,7 @@ pub fn render(
                     strip_area,
                     container,
                     &tab_views,
+                    &tab_statuses,
                     theme,
                     group,
                 );

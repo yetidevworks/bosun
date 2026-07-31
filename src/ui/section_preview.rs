@@ -12,7 +12,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::sidebar::Section;
-use crate::tmux::detector::Status;
 use crate::tmux::session::SessionView;
 use crate::ui::banner;
 use crate::ui::Theme;
@@ -142,12 +141,7 @@ fn paint_caption_and_table(
 
 fn session_rows(view: &SessionView, width: u16, theme: &Theme, lpad: &str) -> [Line<'static>; 2] {
     let glyph = view.status.glyph().to_string();
-    let glyph_color = match view.status {
-        Status::Running => theme.status_running,
-        Status::Waiting => theme.status_waiting,
-        Status::Idle | Status::Unknown => theme.status_idle,
-        Status::Error => theme.status_error,
-    };
+    let glyph_color = crate::ui::session_list::status_color(view.status, theme);
     let name = view.display().to_string();
     let attached = if view.session.attached {
         "  •attached"

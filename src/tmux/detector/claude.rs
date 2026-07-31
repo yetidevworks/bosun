@@ -1,24 +1,36 @@
 //! Claude Code detector.
 //!
-//! Strategy: Claude Code has a recognizable bottom-of-screen UI (a
-//! box-drawn prompt with `╭─/│ > /╰─`) and emits known patterns
-//! around it. Confining most heuristics to the bottom region of the
-//! visible capture is the single biggest reliability win — it filters
-//! out stale "Thinking…" strings sitting in scrollback above the
-//! prompt and stops random shell output from triggering false
-//! positives.
+//! Strategy: prefer what Claude says about *itself* over what we can
+//! infer from its pixels. Claude publishes two first-party signals that
+//! ride `tmux list-sessions` for free:
+//!
+//!   * `#{pane_title}` — set to `<glyph> <task title>`, where the glyph
+//!     is a braille spinner frame while a turn is running and `✳` when
+//!     it isn't. tmux stores only the last title the app set, so this
+//!     does NOT animate frame-by-frame the way the pane body does.
+//!   * `#{pane_current_command}` — Claude names its process after its
+//!     own version (`2_1_220`), so a session whose agent exited reads
+//!     as `zsh`/`bash` instead.
+//!
+//! Pane scraping stays as the fallback (and as the *only* source for
+//! confirmation prompts, which the title can't express). Confining
+//! those heuristics to the bottom region of the capture is the single
+//! biggest reliability win — it filters out stale "Thinking…" strings
+//! sitting in scrollback above the prompt and stops random shell output
+//! from triggering false positives.
 //!
 //! Stack, cheapest first:
-//!   1. Strong Claude anchor: the prompt-box corners (`╭` … `╮` …
-//!      `╰` … `╯`) appear in the bottom region. Falls back to the
-//!      classic substring anchors if the box isn't currently visible
-//!      (e.g. during a full-screen response).
-//!   2. Confirmation prompts ("Do you want to", `❯` option marker,
-//!      `(y/n)`) anywhere on screen → Waiting.
-//!   3. Active spinner: braille glyph in the OSC title OR a
-//!      "Thinking / Pondering / …" verb with ellipsis in the bottom
-//!      region → Running.
-//!   4. Idle fallback when none of the above fire.
+//!   1. Claude anchor: the version-shaped `pane_current_command`, the
+//!      prompt-box corners (`╭` … `╰`) in the bottom region, or the
+//!      classic substring anchors for transient full-screen states.
+//!   2. Confirmation prompts ("Do you want to", numbered `❯` option,
+//!      `(y/n)`) in the bottom region → Waiting.
+//!   3. Active spinner: a braille frame leading the pane title, a
+//!      braille glyph in the raw OSC title, or a "Thinking / Pondering
+//!      / …" verb with ellipsis in the bottom region → Running.
+//!   4. Idle fallback when none of the above fire. The app promotes
+//!      Idle to `Done` for a session that ran and hasn't been looked at
+//!      since — see `AppState::display_status`.
 //!
 //! If the pane doesn't look like Claude at all, return Unknown so
 //! the registry falls through to the next detector.
@@ -26,7 +38,7 @@
 //! Tested against real Claude Code `capture-pane -e` fixtures under
 //! `tests/fixtures/detector/`.
 
-use super::{DetectContext, Status, StatusDetector};
+use super::{is_braille, title_is_working, DetectContext, Status, StatusDetector};
 
 /// How many trailing non-empty lines to consider "the prompt region."
 /// Claude's prompt box is 3 lines; the surrounding hint / spinner /
@@ -48,33 +60,48 @@ impl StatusDetector for ClaudeDetector {
     fn detect(&self, ctx: &DetectContext<'_>) -> Status {
         let bottom = bottom_region(ctx.plain);
 
-        if !looks_like_claude(ctx.plain, &bottom) {
+        if !looks_like_claude(ctx.plain, &bottom, ctx.pane_command) {
             return Status::Unknown;
         }
 
         // Prompt markers — user needs to answer. Scoped to the bottom
         // region so a "(y/n)" in code output doesn't pin the glyph to
-        // Waiting forever.
+        // Waiting forever. The pane is the only source for this; the
+        // title says nothing about a pending confirmation.
         if has_prompt_marker(&bottom) {
             return Status::Waiting;
         }
 
-        // Thinking / spinner markers — busy. Spinner title scan stays
-        // whole-capture (the OSC sequence lives outside the visible
-        // grid); the verb scan is bottom-region only.
-        if has_thinking_marker(&bottom) || has_spinner_title(ctx.ansi) {
+        // Busy. The pane title's leading spinner frame is checked first
+        // and is authoritative — Claude sets it on state change, so it
+        // can't go stale mid-turn the way a scrolled-past "Thinking…"
+        // line can. The pane heuristics stay as fallback for older
+        // Claude builds (and other tools) that don't set a title:
+        // the raw-OSC scan covers a title tmux hasn't recorded yet, and
+        // the verb scan is bottom-region only.
+        if ctx.pane_title.is_some_and(title_is_working)
+            || has_thinking_marker(&bottom)
+            || has_spinner_title(ctx.ansi)
+        {
             return Status::Running;
         }
 
         // Claude is up but neither answering a prompt nor actively
         // working. That covers an empty composer (a fresh instance you
         // haven't tasked yet), a composer with unsubmitted text, the
-        // splash screen, and shell output after exit. None of these
-        // need your attention, so they all read as Idle — only an
-        // explicit confirmation/question (handled above) counts as
-        // Waiting. Previously a visible prompt box pinned the glyph to
-        // Waiting, which made every idle Claude look like it was asking
-        // for something.
+        // splash screen, the backgrounded-conversation task list, and
+        // shell output after exit. None of these need your attention,
+        // so they all read as Idle — only an explicit
+        // confirmation/question (handled above) counts as Waiting.
+        // Previously a visible prompt box pinned the glyph to Waiting,
+        // which made every idle Claude look like it was asking for
+        // something.
+        //
+        // A turn that just *finished* also lands here: the pane alone
+        // can't tell "done, unread" from "sitting at an empty composer"
+        // — that's a question about what the user has looked at, which
+        // only the app knows. `AppState::display_status` promotes Idle
+        // to `Done` for a session that ran and hasn't been viewed since.
         Status::Idle
     }
 }
@@ -93,8 +120,16 @@ fn bottom_region(plain: &str) -> String {
     lines.join("\n")
 }
 
-fn looks_like_claude(plain: &str, bottom: &str) -> bool {
-    // Strongest signal: Claude's box-drawn prompt corners visible in
+fn looks_like_claude(plain: &str, bottom: &str, pane_command: Option<&str>) -> bool {
+    // Strongest signal, and free: Claude Code renames its process to
+    // its own version, so `#{pane_current_command}` reads `2_1_220`.
+    // This holds even when the pane is showing something that looks
+    // nothing like the usual UI (a full-screen diff, the backgrounded
+    // task list, a `/`-menu), where every text anchor below can miss.
+    if pane_command.is_some_and(is_claude_version_command) {
+        return true;
+    }
+    // Next strongest: Claude's box-drawn prompt corners visible in
     // the bottom region. Unique enough that no plain shell pane will
     // hit it by accident.
     if bottom.contains('╭') && bottom.contains('╰') {
@@ -105,6 +140,17 @@ fn looks_like_claude(plain: &str, bottom: &str) -> bool {
     plain.contains("? for shortcuts")
         || plain.contains("▐▛███▜▌") // splash art
         || plain.contains("Claude Code")
+}
+
+/// Claude Code sets its process title to its version with dots replaced
+/// by underscores (`2.1.220` → `2_1_220`), which is what
+/// `#{pane_current_command}` reports. Match that shape — leading digit,
+/// then only digits and underscores, with at least one underscore — so
+/// a genuine binary named e.g. `node` or `zsh` can't be mistaken for it.
+fn is_claude_version_command(cmd: &str) -> bool {
+    cmd.starts_with(|c: char| c.is_ascii_digit())
+        && cmd.contains('_')
+        && cmd.chars().all(|c| c.is_ascii_digit() || c == '_')
 }
 
 fn has_prompt_marker(region: &str) -> bool {
@@ -194,10 +240,6 @@ fn has_spinner_title(ansi: &[u8]) -> bool {
     false
 }
 
-fn is_braille(c: char) -> bool {
-    ('\u{2800}'..='\u{28ff}').contains(&c)
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::SystemTime;
@@ -207,7 +249,14 @@ mod tests {
 
     fn ctx_plain(s: &str) -> DetectContext<'_> {
         let now = SystemTime::now();
-        DetectContext::from_parts(s.as_bytes(), s, Some(now), now, None, "test")
+        DetectContext::from_parts(s.as_bytes(), s, Some(now), now, None, "test", None, None)
+    }
+
+    /// Same as [`ctx_plain`] but with the first-party tmux signals set,
+    /// so the title/process-name paths get exercised.
+    fn ctx_with<'a>(s: &'a str, title: Option<&'a str>, cmd: Option<&'a str>) -> DetectContext<'a> {
+        let now = SystemTime::now();
+        DetectContext::from_parts(s.as_bytes(), s, Some(now), now, None, "test", title, cmd)
     }
 
     #[test]
@@ -354,8 +403,94 @@ some output
         ansi.extend_from_slice("╭──╮\n│ > │\n╰──╯".as_bytes());
         let plain = strip_ansi(&ansi);
         let now = SystemTime::now();
-        let ctx = DetectContext::from_parts(&ansi, &plain, Some(now), now, None, "test");
+        let ctx =
+            DetectContext::from_parts(&ansi, &plain, Some(now), now, None, "test", None, None);
         assert_eq!(ClaudeDetector.detect(&ctx), Status::Running);
+    }
+
+    #[test]
+    fn pane_title_spinner_yields_running() {
+        // The authoritative busy signal: Claude's own OSC title carries
+        // a braille frame while a turn is in flight. No "Thinking…" in
+        // the pane at all — the title alone must be enough.
+        let pane = "\
+Claude Code v2.1.220
+
+╭──────────────────────────────╮
+│ ❯                             │
+╰──────────────────────────────╯
+";
+        let ctx = ctx_with(pane, Some("⠙ Fix the parser bug"), Some("2_1_220"));
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Running);
+    }
+
+    #[test]
+    fn pane_title_star_glyph_is_idle() {
+        // `✳` is Claude's not-working marker. Same pane as above, so
+        // the only thing deciding the answer is the title glyph.
+        let pane = "\
+Claude Code v2.1.220
+
+╭──────────────────────────────╮
+│ ❯                             │
+╰──────────────────────────────╯
+";
+        let ctx = ctx_with(pane, Some("✳ Fix the parser bug"), Some("2_1_220"));
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Idle);
+    }
+
+    #[test]
+    fn version_process_name_anchors_claude() {
+        // The backgrounded task list has none of the usual anchors —
+        // no prompt box, no "? for shortcuts" — but the process name
+        // still identifies it as Claude rather than falling through.
+        let pane = "\
+Ready for review
+· Review TailwindPHP library for Grav adm…  claude --dangerously-skip-permissions
+───────────────────────────────────────────
+❯ describe a task for a new session
+";
+        let ctx = ctx_with(
+            pane,
+            Some("2 awaiting input · claude agents"),
+            Some("2_1_220"),
+        );
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Idle);
+    }
+
+    #[test]
+    fn task_list_working_row_does_not_read_as_running() {
+        // The task list shows OTHER sessions' work, including rotating
+        // spinner glyphs on their rows. That must not make *this*
+        // session read as busy — its own title has no spinner frame.
+        let pane = "\
+Working
+✻ Ensure forum-pro CSS works with default…  i'm pretty close to getting Forum Pro …   1d
+───────────────────────────────────────────
+❯ describe a task for a new session
+";
+        let ctx = ctx_with(
+            pane,
+            Some("2 awaiting input · claude agents"),
+            Some("2_1_220"),
+        );
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Idle);
+    }
+
+    #[test]
+    fn shell_process_name_is_not_claude() {
+        let ctx = ctx_with("$ ls -la\ntotal 42\n", Some("hades-2.local"), Some("zsh"));
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Unknown);
+    }
+
+    #[test]
+    fn version_command_shape_is_strict() {
+        assert!(is_claude_version_command("2_1_220"));
+        assert!(is_claude_version_command("2_1_0"));
+        assert!(!is_claude_version_command("zsh"));
+        assert!(!is_claude_version_command("node"));
+        assert!(!is_claude_version_command("7zip"));
+        assert!(!is_claude_version_command("bash5_2"));
     }
 
     #[test]

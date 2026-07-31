@@ -54,6 +54,22 @@ pub struct TmuxSession {
     /// rewraps the text without any new agent output. `0` when unknown
     /// (older tmux output / terse test fixtures).
     pub pane_width: u16,
+    /// The active pane's OSC title (`#{pane_title}`). Agent TUIs set
+    /// this to describe their own state — Claude Code writes
+    /// `<glyph> <task title>`, where the glyph is a braille spinner
+    /// while it's working and `✳` when it isn't. tmux records only the
+    /// last title the app set, so unlike the pane body this does *not*
+    /// animate frame-by-frame: it's a stable, first-party state signal
+    /// that costs nothing extra to read (it rides `list-sessions`).
+    /// `None` when the pane never set a title.
+    pub pane_title: Option<String>,
+    /// Command running in the active pane (`#{pane_current_command}`).
+    /// Distinguishes a live agent from a bare shell: Claude Code names
+    /// its process after its own version (`2_1_220`), while a session
+    /// whose agent exited falls back to `zsh` / `bash`. Lets the
+    /// detectors tell "agent up and idle" from "agent gone" without
+    /// guessing from pane text. `None` when unknown.
+    pub pane_command: Option<String>,
 }
 
 impl TmuxSession {
@@ -116,5 +132,11 @@ impl SessionView {
     /// by the unread tracker so a reflow isn't mistaken for new output.
     pub fn width(&self) -> u16 {
         self.session.pane_width
+    }
+
+    /// The active pane's OSC title, if it set one (see
+    /// [`TmuxSession::pane_title`]).
+    pub fn pane_title(&self) -> Option<&str> {
+        self.session.pane_title.as_deref()
     }
 }

@@ -21,10 +21,16 @@ pub enum Status {
     Running,
     /// The agent is paused waiting for user input (prompt, confirmation).
     Waiting,
-    /// The agent is done / quiet. Shell prompt, sleeping, etc.
+    /// The agent finished a turn and its answer hasn't been read yet.
+    /// Distinct from [`Status::Idle`]: nothing is *blocked* on you, but
+    /// there is fresh work to look at. Cleared to `Idle` once the row is
+    /// viewed, so it reads as "ready for review" rather than a permanent
+    /// badge.
+    Done,
+    /// The agent is up but quiet with nothing pending — an empty
+    /// composer, a splash screen, a shell prompt.
     Idle,
     /// Agent crashed or session errored out.
-    #[allow(dead_code)]
     Error,
     /// Detector could not determine the state.
     #[default]
@@ -36,9 +42,23 @@ impl Status {
         match self {
             Status::Running => "●",
             Status::Waiting => "◐",
+            Status::Done => "◆",
             Status::Idle => "○",
             Status::Error => "✕",
             Status::Unknown => "·",
+        }
+    }
+
+    /// One-word label for the legend in the help modal and for the
+    /// status bar. Kept next to [`Self::glyph`] so the two can't drift.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Running => "Running",
+            Status::Waiting => "Waiting",
+            Status::Done => "Done",
+            Status::Idle => "Idle",
+            Status::Error => "Error",
+            Status::Unknown => "Unknown",
         }
     }
 }
@@ -57,9 +77,18 @@ pub struct DetectContext<'a> {
     /// can match on session name / agent type.
     #[allow(dead_code)]
     pub session_name: &'a str,
+    /// The pane's OSC title (`#{pane_title}`). Agent TUIs publish their
+    /// own state here, which beats inferring it from pane text: the
+    /// title only changes when the agent changes state, whereas the
+    /// pane body churns constantly with spinners and elapsed timers.
+    pub pane_title: Option<&'a str>,
+    /// Command running in the pane (`#{pane_current_command}`) — tells
+    /// a live agent process from a bare shell.
+    pub pane_command: Option<&'a str>,
 }
 
 impl<'a> DetectContext<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         ansi: &'a [u8],
         plain: &'a str,
@@ -67,6 +96,8 @@ impl<'a> DetectContext<'a> {
         now: SystemTime,
         previous: Option<Status>,
         session_name: &'a str,
+        pane_title: Option<&'a str>,
+        pane_command: Option<&'a str>,
     ) -> Self {
         let activity_age = match last_activity {
             Some(ts) => now.duration_since(ts).unwrap_or(Duration::ZERO),
@@ -78,8 +109,25 @@ impl<'a> DetectContext<'a> {
             activity_age,
             previous,
             session_name,
+            pane_title,
+            pane_command,
         }
     }
+}
+
+/// Braille glyphs (U+2800..U+28FF) — the animation frames every agent
+/// TUI we know of uses for its "working" spinner, in both the pane body
+/// and the OSC title.
+pub fn is_braille(c: char) -> bool {
+    ('\u{2800}'..='\u{28ff}').contains(&c)
+}
+
+/// True when `title` carries a live spinner frame, i.e. the agent is
+/// mid-turn. Claude Code writes `⠙ Fix the parser bug` while working and
+/// `✳ Fix the parser bug` when it isn't, so the leading glyph alone
+/// answers "is this agent busy right now" without touching the pane.
+pub fn title_is_working(title: &str) -> bool {
+    title.chars().take(4).any(is_braille)
 }
 
 pub trait StatusDetector: Send + Sync {
@@ -249,8 +297,29 @@ mod tests {
                 answer: Status::Running,
             }));
         let now = SystemTime::now();
-        let ctx = DetectContext::from_parts(b"", "", Some(now), now, None, "x");
+        let ctx = DetectContext::from_parts(b"", "", Some(now), now, None, "x", None, None);
         // high returns Unknown, mid returns Running → Running wins
         assert_eq!(r.detect(&ctx), Status::Running);
+    }
+
+    #[test]
+    fn title_spinner_frame_reads_as_working() {
+        assert!(title_is_working("⠙ Fix the parser bug"));
+        assert!(title_is_working("⠂ Fix Bosun status icon flickering"));
+    }
+
+    #[test]
+    fn title_star_glyph_is_not_working() {
+        // Claude's idle/awaiting marker — must not read as busy.
+        assert!(!title_is_working("✳ Investigate GitHub issue 13"));
+        assert!(!title_is_working("2 awaiting input · claude agents"));
+        assert!(!title_is_working("hades-2.local"));
+    }
+
+    #[test]
+    fn braille_deep_in_a_title_is_not_a_spinner() {
+        // Only the leading glyph is the spinner slot; braille appearing
+        // in the middle of a task name must not peg the row to Running.
+        assert!(!title_is_working("Fix the ⠙ renderer bug"));
     }
 }

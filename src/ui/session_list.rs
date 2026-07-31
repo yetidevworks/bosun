@@ -61,8 +61,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
                 match state.session_by_name(&c.active) {
                     Some(v) => {
                         let op = state.pending_ops.get(v.name()).map(|o| o.kind);
+                        let status = state.display_status(v);
                         out.push(render_primary_line(
-                            v, selected, false, tabs, bg_busy, unread, op, area.width, theme,
+                            v, status, selected, false, tabs, bg_busy, unread, op, area.width,
+                            theme,
                         ));
                         out.push(render_meta_line(v, selected, false, area.width, theme));
                         if narrow && tabs > 1 {
@@ -97,8 +99,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
                 match state.session_by_name(&container.active) {
                     Some(v) => {
                         let op = state.pending_ops.get(v.name()).map(|o| o.kind);
+                        let status = state.display_status(v);
                         out.push(render_primary_line(
-                            v, selected, true, tabs, bg_busy, unread, op, area.width, theme,
+                            v, status, selected, true, tabs, bg_busy, unread, op, area.width, theme,
                         ));
                         out.push(render_meta_line(v, selected, true, area.width, theme));
                         if narrow && tabs > 1 {
@@ -228,10 +231,11 @@ pub fn entry_at_row(state: &AppState, list_area: Rect, abs_row: u16) -> Option<u
     None
 }
 
-fn status_color(status: Status, theme: &Theme) -> Color {
+pub fn status_color(status: Status, theme: &Theme) -> Color {
     match status {
         Status::Running => theme.status_running,
         Status::Waiting => theme.status_waiting,
+        Status::Done => theme.done_color(),
         Status::Idle | Status::Unknown => theme.status_idle,
         Status::Error => theme.status_error,
     }
@@ -322,6 +326,7 @@ fn container_unread(state: &AppState, container: &crate::sidebar::Container) -> 
 #[allow(clippy::too_many_arguments)]
 fn render_primary_line(
     view: &SessionView,
+    status: Status,
     selected: bool,
     indented: bool,
     tabs: u16,
@@ -362,12 +367,12 @@ fn render_primary_line(
     // and a present-progressive label ("killing…") trails the row.
     let status_style = match op {
         Some(_) => Style::default().fg(theme.status_waiting).bg(bg),
-        None => Style::default().fg(status_color(view.status, theme)).bg(bg),
+        None => Style::default().fg(status_color(status, theme)).bg(bg),
     };
 
     let glyph = match op {
         Some(_) => "⟳".to_string(),
-        None => view.status.glyph().to_string(),
+        None => status.glyph().to_string(),
     };
     let op_label = match op {
         Some(k) => format!("  {}…", k.label()),

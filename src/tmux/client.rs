@@ -1126,10 +1126,21 @@ mod git_tests {
     use super::*;
 
     /// Spawn `git -C <dir> <args>`, asserting the command succeeds.
+    ///
+    /// Signing is forced off for these throwaway repos. A developer
+    /// with `commit.gpgsign = true` globally otherwise drags gpg-agent
+    /// into every fixture commit, and the suite fails non-
+    /// deterministically ("gpg: signing failed") on whichever test
+    /// happens to run when the agent is unhappy. Nothing here is about
+    /// signatures.
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .arg("-c")
+            .arg("tag.gpgsign=false")
             .args(args)
             .output()
             .expect("spawn git");

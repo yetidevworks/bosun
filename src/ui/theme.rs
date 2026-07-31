@@ -66,6 +66,11 @@ pub struct Theme {
     /// Session status: error / destructive action accent.
     #[serde(with = "hex_color")]
     pub status_error: Color,
+    /// Session status: finished a turn, not read yet. Optional so a
+    /// user theme written before this state existed still parses —
+    /// [`Theme::done_color`] falls back to the theme's accent.
+    #[serde(default, with = "hex_color_opt")]
+    pub status_done: Option<Color>,
 }
 
 impl Theme {
@@ -92,6 +97,14 @@ impl Theme {
             }
             _ => self.text,
         }
+    }
+
+    /// Color for the "finished, unread" status glyph. Themes that
+    /// predate the state (any user theme, since built-ins all set it)
+    /// fall back to the accent, which is always defined and always
+    /// distinct from the running/waiting/idle trio.
+    pub fn done_color(&self) -> Color {
+        self.status_done.unwrap_or(self.accent)
     }
 
     /// Resolve a theme by name. Checks the user theme directory
@@ -313,7 +326,7 @@ mod hex_color {
         parse_hex(&s).map_err(serde::de::Error::custom)
     }
 
-    fn parse_hex(s: &str) -> Result<Color, String> {
+    pub(super) fn parse_hex(s: &str) -> Result<Color, String> {
         let hex = s.trim().trim_start_matches('#');
         if hex.len() != 6 {
             return Err(format!("expected #RRGGBB hex color, got {s:?}"));
@@ -322,6 +335,27 @@ mod hex_color {
         let g = u8::from_str_radix(&hex[2..4], 16).map_err(|e| e.to_string())?;
         let b = u8::from_str_radix(&hex[4..6], 16).map_err(|e| e.to_string())?;
         Ok(Color::Rgb(r, g, b))
+    }
+}
+
+/// Same as [`hex_color`] but for optional keys — a theme file that
+/// omits the color parses to `None` instead of failing. Keeps user
+/// themes written against an older bosun loading unchanged when a new
+/// status color is added.
+mod hex_color_opt {
+    use ratatui::style::Color;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(de: D) -> Result<Option<Color>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(s) = Option::<String>::deserialize(de)? else {
+            return Ok(None);
+        };
+        super::hex_color::parse_hex(&s)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
     }
 }
 

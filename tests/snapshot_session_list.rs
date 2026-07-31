@@ -67,6 +67,8 @@ fn ses_with_status(name: &str, attached: bool, status: Status) -> SessionView {
             worktree_path: None,
             branch: None,
             pane_width: 80,
+            pane_title: None,
+            pane_command: None,
         },
         status,
         None,

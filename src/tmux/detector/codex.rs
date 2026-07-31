@@ -152,7 +152,7 @@ mod tests {
 
     fn ctx_plain(s: &str) -> DetectContext<'_> {
         let now = SystemTime::now();
-        DetectContext::from_parts(s.as_bytes(), s, Some(now), now, None, "test")
+        DetectContext::from_parts(s.as_bytes(), s, Some(now), now, None, "test", None, None)
     }
 
     #[test]
@@ -185,6 +185,8 @@ mod tests {
                 now,
                 None,
                 "test",
+                None,
+                None,
             )
         };
         assert_eq!(CodexDetector.detect(&ctx), Status::Idle);

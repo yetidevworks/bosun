@@ -169,11 +169,19 @@ fn plus_slot(area: Rect) -> Option<Slot> {
 /// container-member order; `None` for any tab whose tmux session
 /// no longer exists (dead-row case — rare; the tab still renders
 /// using its internal name and a `Status::Unknown` glyph).
+///
+/// `tab_statuses` carries the *display* status per tab (see
+/// `AppState::display_status`) rather than the raw detected one, so a
+/// sibling tab that finished a turn shows `◆` here for the same reason
+/// its sidebar row does. Shorter than `container.members` (or absent
+/// entries) falls back to the view's own status.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
     container: &Container,
     tab_views: &[Option<&SessionView>],
+    tab_statuses: &[Status],
     theme: &Theme,
     group: Option<&str>,
 ) -> Layout {
@@ -195,7 +203,11 @@ pub fn render(
                 Some(g) => format!("{g}/{base}"),
                 None => base,
             };
-            let status = view.map(|v| v.status).unwrap_or(Status::Unknown);
+            let status = tab_statuses
+                .get(i)
+                .copied()
+                .or_else(|| view.map(|v| v.status))
+                .unwrap_or(Status::Unknown);
             (label, status)
         })
         .collect();
@@ -321,7 +333,7 @@ mod tests {
         // No live SessionView -> label falls back to the internal name,
         // which is fine for asserting the prefix is applied.
         let views: Vec<Option<&SessionView>> = vec![None];
-        render(&mut buf, area, &con, &views, &theme, Some("proj"));
+        render(&mut buf, area, &con, &views, &[], &theme, Some("proj"));
         let row: String = (0..40)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
@@ -336,7 +348,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let con = Container::single("bosun-alpha-bbbb".into(), "alpha".into());
         let views: Vec<Option<&SessionView>> = vec![None];
-        render(&mut buf, area, &con, &views, &theme, None);
+        render(&mut buf, area, &con, &views, &[], &theme, None);
         let row: String = (0..40)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
