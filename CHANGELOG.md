@@ -4,6 +4,19 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.17] — 2026-08-08
+
+### Added
+- **Claude Code sessions are named after the bosun session.** Launch
+  and restart now pass `--name <slug>` (the display name, slugified —
+  `My Rocket Fox` → `my-rocket-fox`) so `claude --resume`'s picker and
+  the claude.ai session list show the same name as the bosun sidebar
+  instead of an auto-generated one. A `--continue` restart re-asserts
+  the name on the resumed session. If you put your own `--name` in the
+  extra-args field it wins and bosun stays out of the way. Requires a
+  Claude Code CLI new enough to know `--name`; codex and kimi have no
+  equivalent flag and are unchanged.
+
 ## [2.0.16] — 2026-07-31
 
 ### Added

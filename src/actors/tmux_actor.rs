@@ -463,6 +463,7 @@ pub fn spawn(
                                 &spec.agent,
                                 &spec.options,
                                 &spec.args,
+                                &spec.name,
                                 resume.unwrap_or(spec.resume),
                             );
                             if command.is_empty() {
@@ -1036,7 +1037,12 @@ pub(crate) fn slug_from_internal<'a>(internal: &'a str, prefix: &str) -> Option<
 ///
 /// `terminal` just types whatever extra args the user provided (or
 /// nothing — you get a plain shell).
-fn build_agent_command(agent: &str, options: &SpecOptions, args: &str) -> String {
+///
+/// `name` is the bosun display name; for claude it's slugified and
+/// passed as `--name` so the Claude Code session list shows the same
+/// name as the bosun sidebar (on `--continue` restarts it re-asserts
+/// the name on the resumed session).
+fn build_agent_command(agent: &str, options: &SpecOptions, args: &str, name: &str) -> String {
     let args = args.trim();
     match agent {
         "claude" => {
@@ -1048,6 +1054,10 @@ fn build_agent_command(agent: &str, options: &SpecOptions, args: &str) -> String
             }
             if options.claude.skip_permissions {
                 parts.push("--dangerously-skip-permissions".into());
+            }
+            let slug = slugify(name);
+            if !slug.is_empty() && !args.contains("--name") {
+                parts.push(format!("--name {}", slug));
             }
             if !args.is_empty() {
                 parts.push(args.to_string());
@@ -1095,15 +1105,21 @@ fn build_agent_command(agent: &str, options: &SpecOptions, args: &str) -> String
 /// next plain launch goes back to the saved mode. For agents with no
 /// resume concept (or `resume == false`) this is identical to
 /// `build_agent_command`.
-fn build_launch_command(agent: &str, options: &SpecOptions, args: &str, resume: bool) -> String {
+fn build_launch_command(
+    agent: &str,
+    options: &SpecOptions,
+    args: &str,
+    name: &str,
+    resume: bool,
+) -> String {
     if !resume {
-        return build_agent_command(agent, options, args);
+        return build_agent_command(agent, options, args, name);
     }
     match agent {
         "claude" => {
             let mut options = options.clone();
             options.claude.session_mode = ClaudeSessionMode::Continue;
-            build_agent_command(agent, &options, args)
+            build_agent_command(agent, &options, args, name)
         }
         "codex" => {
             let args = args.trim();
@@ -1119,9 +1135,9 @@ fn build_launch_command(agent: &str, options: &SpecOptions, args: &str, resume: 
         "kimi" => {
             let mut options = options.clone();
             options.kimi.session_mode = ClaudeSessionMode::Continue;
-            build_agent_command(agent, &options, args)
+            build_agent_command(agent, &options, args, name)
         }
-        _ => build_agent_command(agent, options, args),
+        _ => build_agent_command(agent, options, args, name),
     }
 }
 
@@ -1169,7 +1185,13 @@ async fn create_session(
     let command = if defer_launch {
         String::new()
     } else {
-        build_launch_command(&spec.agent, &spec.options, &spec.args, spec.resume)
+        build_launch_command(
+            &spec.agent,
+            &spec.options,
+            &spec.args,
+            &spec.name,
+            spec.resume,
+        )
     };
     let metadata = Some(spec_to_metadata(&spec));
     let create = CreateSpec {
@@ -1722,14 +1744,17 @@ mod build_cmd_tests {
 
     #[test]
     fn claude_with_no_options_is_bare() {
-        assert_eq!(build_agent_command("claude", &opts(), ""), "claude");
+        assert_eq!(build_agent_command("claude", &opts(), "", ""), "claude");
     }
 
     #[test]
     fn claude_continue_adds_flag() {
         let mut o = opts();
         o.claude.session_mode = ClaudeSessionMode::Continue;
-        assert_eq!(build_agent_command("claude", &o, ""), "claude --continue");
+        assert_eq!(
+            build_agent_command("claude", &o, "", ""),
+            "claude --continue"
+        );
     }
 
     #[test]
@@ -1743,7 +1768,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, ""),
+            build_agent_command("claude", &o, "", ""),
             "claude --resume --dangerously-skip-permissions"
         );
     }
@@ -1759,9 +1784,63 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus"),
+            build_agent_command("claude", &o, "--model=opus", ""),
             "claude --dangerously-skip-permissions --model=opus"
         );
+    }
+
+    #[test]
+    fn claude_name_appends_slugified_display_name() {
+        assert_eq!(
+            build_agent_command("claude", &opts(), "", "My Rocket Fox"),
+            "claude --name my-rocket-fox"
+        );
+    }
+
+    #[test]
+    fn claude_name_combines_with_flags_and_args() {
+        let o = SpecOptions {
+            claude: ClaudeOptions {
+                session_mode: ClaudeSessionMode::Continue,
+                skip_permissions: true,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("claude", &o, "--model=opus", "Bosun Fix"),
+            "claude --continue --dangerously-skip-permissions --name bosun-fix --model=opus"
+        );
+    }
+
+    #[test]
+    fn claude_name_skipped_when_user_args_set_their_own() {
+        // A user-supplied --name in the extra args wins; don't emit a
+        // duplicate that commander would reject.
+        assert_eq!(
+            build_agent_command("claude", &opts(), "--name custom", "My Session"),
+            "claude --name custom"
+        );
+    }
+
+    #[test]
+    fn claude_name_skipped_when_slug_is_empty() {
+        assert_eq!(build_agent_command("claude", &opts(), "", "!!!"), "claude");
+    }
+
+    #[test]
+    fn launch_resume_keeps_claude_name() {
+        // The `r` restart re-asserts the bosun name on the resumed session.
+        assert_eq!(
+            build_launch_command("claude", &opts(), "", "My Rocket Fox", true),
+            "claude --continue --name my-rocket-fox"
+        );
+    }
+
+    #[test]
+    fn name_ignored_for_other_agents() {
+        assert_eq!(build_agent_command("codex", &opts(), "", "My Fox"), "codex");
+        assert_eq!(build_agent_command("kimi", &opts(), "", "My Fox"), "kimi");
+        assert_eq!(build_agent_command("terminal", &opts(), "", "My Fox"), "");
     }
 
     #[test]
@@ -1770,12 +1849,12 @@ mod build_cmd_tests {
             codex: CodexOptions { yolo: true },
             ..Default::default()
         };
-        assert_eq!(build_agent_command("codex", &o, ""), "codex --yolo");
+        assert_eq!(build_agent_command("codex", &o, "", ""), "codex --yolo");
     }
 
     #[test]
     fn kimi_uses_kimi_binary_and_defaults_bare() {
-        assert_eq!(build_agent_command("kimi", &opts(), ""), "kimi");
+        assert_eq!(build_agent_command("kimi", &opts(), "", ""), "kimi");
     }
 
     #[test]
@@ -1788,7 +1867,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("kimi", &o, "-m k2"),
+            build_agent_command("kimi", &o, "-m k2", ""),
             "kimi --continue --yolo -m k2"
         );
     }
@@ -1802,7 +1881,7 @@ mod build_cmd_tests {
             },
             ..Default::default()
         };
-        assert_eq!(build_agent_command("kimi", &o, ""), "kimi --session");
+        assert_eq!(build_agent_command("kimi", &o, "", ""), "kimi --session");
     }
 
     #[test]
@@ -1817,7 +1896,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("kimi", &o, "", true),
+            build_launch_command("kimi", &o, "", "", true),
             "kimi --continue --yolo"
         );
     }
@@ -1832,15 +1911,18 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("terminal", &o, "vim .zshrc"),
+            build_agent_command("terminal", &o, "vim .zshrc", ""),
             "vim .zshrc"
         );
-        assert_eq!(build_agent_command("terminal", &opts(), ""), "");
+        assert_eq!(build_agent_command("terminal", &opts(), "", ""), "");
     }
 
     #[test]
     fn launch_without_resume_matches_plain_build() {
-        assert_eq!(build_launch_command("claude", &opts(), "", false), "claude");
+        assert_eq!(
+            build_launch_command("claude", &opts(), "", "", false),
+            "claude"
+        );
     }
 
     #[test]
@@ -1848,7 +1930,7 @@ mod build_cmd_tests {
         // Persisted mode is the default (New); the one-shot resume
         // override swaps in `--continue` without touching the options.
         assert_eq!(
-            build_launch_command("claude", &opts(), "", true),
+            build_launch_command("claude", &opts(), "", "", true),
             "claude --continue"
         );
     }
@@ -1863,7 +1945,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("claude", &o, "--model=opus", true),
+            build_launch_command("claude", &o, "--model=opus", "", true),
             "claude --continue --dangerously-skip-permissions --model=opus"
         );
     }
@@ -1871,7 +1953,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_uses_codex_resume_last() {
         assert_eq!(
-            build_launch_command("codex", &opts(), "", true),
+            build_launch_command("codex", &opts(), "", "", true),
             "codex resume --last"
         );
     }
@@ -1883,7 +1965,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("codex", &o, "--model gpt-5", true),
+            build_launch_command("codex", &o, "--model gpt-5", "", true),
             "codex resume --last --yolo --model gpt-5"
         );
     }
@@ -1891,7 +1973,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_noop_for_terminal() {
         assert_eq!(
-            build_launch_command("terminal", &opts(), "vim .zshrc", true),
+            build_launch_command("terminal", &opts(), "vim .zshrc", "", true),
             "vim .zshrc"
         );
     }
