@@ -89,6 +89,11 @@ impl Store {
                 codex_yolo               INTEGER NOT NULL DEFAULT 0,
                 kimi_session_mode        TEXT NOT NULL DEFAULT 'New',
                 kimi_yolo                INTEGER NOT NULL DEFAULT 0,
+                codex_session_mode       TEXT NOT NULL DEFAULT 'New',
+                opencode_session_mode    TEXT NOT NULL DEFAULT 'New',
+                opencode_auto            INTEGER NOT NULL DEFAULT 0,
+                qwen_session_mode        TEXT NOT NULL DEFAULT 'New',
+                qwen_yolo                INTEGER NOT NULL DEFAULT 0,
                 last_used_at             INTEGER NOT NULL,
                 use_count                INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(name, path, agent) ON CONFLICT IGNORE
@@ -100,13 +105,19 @@ impl Store {
             "#,
         )
         .map_err(map_sql_err)?;
-        // Additive migration for DBs created before the kimi columns
-        // existed. `CREATE TABLE IF NOT EXISTS` above is a no-op on an
-        // existing table, so add the columns explicitly and treat the
-        // "duplicate column name" error as success (idempotent re-run).
+        // Additive migrations for DBs created before newer agent
+        // columns existed. `CREATE TABLE IF NOT EXISTS` above is a
+        // no-op on an existing table, so add the columns explicitly
+        // and treat the "duplicate column name" error as success
+        // (idempotent re-run).
         for stmt in [
             "ALTER TABLE recents ADD COLUMN kimi_session_mode TEXT NOT NULL DEFAULT 'New'",
             "ALTER TABLE recents ADD COLUMN kimi_yolo INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recents ADD COLUMN codex_session_mode TEXT NOT NULL DEFAULT 'New'",
+            "ALTER TABLE recents ADD COLUMN opencode_session_mode TEXT NOT NULL DEFAULT 'New'",
+            "ALTER TABLE recents ADD COLUMN opencode_auto INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recents ADD COLUMN qwen_session_mode TEXT NOT NULL DEFAULT 'New'",
+            "ALTER TABLE recents ADD COLUMN qwen_yolo INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(e) = conn.execute(stmt, []) {
                 let msg = e.to_string();

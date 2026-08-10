@@ -4,6 +4,33 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.18] — 2026-08-10
+
+### Added
+- **OpenCode is a first-class agent.** Pick `opencode` in the
+  new-session modal and get a New/Continue session radio (`--continue`
+  reopens the working directory's last session) plus an Auto checkbox
+  (`--auto`, opencode's auto-approve mode). Restart's one-shot `r`
+  resume, the recents store, modify, and live status detection all
+  work the same as for the other agents.
+- **Qwen Code is a first-class agent.** Pick `qwen` and get the full
+  New/Continue/Resume radio — `--continue` reopens the working
+  directory's most recent session, `--resume` opens Qwen's session
+  picker — plus a YOLO checkbox (`--yolo`). Same restart/recents/
+  modify/status-detection coverage as OpenCode.
+- **Per-agent binary overrides.** A new `[agents]` table in
+  `config.toml` maps an agent to the executable that launches it, e.g.
+  `opencode = "/Users/me/bin/opencode-wrapper"` — handy for wrapper
+  scripts that fix up the environment (say, unset `GIT_EXTERNAL_DIFF`)
+  before exec'ing the real binary, or for differently-named installs
+  like `codex-nightly`. Unset agents keep resolving their own name on
+  the login-shell PATH.
+- **Codex sessions can now be continued and resumed.** Codex grew a
+  real `resume` subcommand since bosun first wired it, so the codex
+  options gain the same session radio as Claude: Continue launches
+  `codex resume --last`, Resume launches bare `codex resume` (its
+  interactive picker).
+
 ## [2.0.17] — 2026-08-08
 
 ### Added

@@ -117,7 +117,9 @@ fn has_activity_marker(region: &str) -> bool {
         .any(|v| region.contains(&format!("{v}…")) || region.contains(&format!("{v}...")))
 }
 
-fn has_spinner_title(ansi: &[u8]) -> bool {
+// Shared with the OpenCode and Qwen detectors, which use the same
+// braille-spinner-in-OSC-title heuristic.
+pub(crate) fn has_spinner_title(ansi: &[u8]) -> bool {
     // Reuse the same braille-spinner-in-OSC-title trick as the Claude
     // and Codex detectors. Many CLIs set a terminal title while busy.
     let s = String::from_utf8_lossy(ansi);

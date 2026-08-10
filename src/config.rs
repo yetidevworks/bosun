@@ -177,6 +177,13 @@ pub struct Config {
     pub show_group_in_title: bool,
     /// Where `git worktree add` places new worktrees. See `WorktreeLocation`.
     pub worktree_location: WorktreeLocation,
+    /// Per-agent binary overrides from the `[agents]` table in
+    /// `config.toml`, e.g. `opencode = "~/bin/opencode-wrapper"`.
+    /// The value replaces the agent's binary in the launch command
+    /// verbatim, so a wrapper script can fix up the environment
+    /// before exec'ing the real binary. Missing entries fall back to
+    /// the agent's own name resolved on the login-shell PATH.
+    pub agent_binaries: std::collections::HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -201,6 +208,7 @@ impl Default for Config {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            agent_binaries: std::collections::HashMap::new(),
         }
     }
 }
@@ -274,6 +282,14 @@ struct ConfigFile {
     /// Worktree placement scheme. See `Config::worktree_location`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree_location: Option<WorktreeLocation>,
+    /// Per-agent binary overrides. See `Config::agent_binaries`.
+    /// Persisted as the `[agents]` table:
+    /// ```toml
+    /// [agents]
+    /// opencode = "/Users/me/bin/opencode-wrapper"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agents: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Config {
@@ -391,6 +407,8 @@ impl Config {
 
         let worktree_location = file.worktree_location.unwrap_or_default();
 
+        let agent_binaries = file.agents.unwrap_or_default();
+
         Self {
             session_prefix,
             tmux_socket,
@@ -407,6 +425,7 @@ impl Config {
             sidebar_hidden,
             show_group_in_title,
             worktree_location,
+            agent_binaries,
         }
     }
 
@@ -738,6 +757,7 @@ mod tests {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            agent_binaries: std::collections::HashMap::new(),
         }
     }
 
@@ -782,6 +802,7 @@ mod tests {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            agent_binaries: std::collections::HashMap::new(),
         };
         assert!(!c.manages("bosun-mine-abc"));
         assert!(c.manages("bosun-other-xyz"));

@@ -465,6 +465,7 @@ pub fn spawn(
                                 &spec.args,
                                 &spec.name,
                                 resume.unwrap_or(spec.resume),
+                                &config.agent_binaries,
                             );
                             if command.is_empty() {
                                 continue;
@@ -1042,11 +1043,31 @@ pub(crate) fn slug_from_internal<'a>(internal: &'a str, prefix: &str) -> Option<
 /// passed as `--name` so the Claude Code session list shows the same
 /// name as the bosun sidebar (on `--continue` restarts it re-asserts
 /// the name on the resumed session).
-fn build_agent_command(agent: &str, options: &SpecOptions, args: &str, name: &str) -> String {
+/// Resolve the binary that launches `agent`: the user's `[agents]`
+/// override from `config.toml` when set (e.g. a wrapper script that
+/// fixes up the environment before exec'ing the real binary),
+/// otherwise the agent name itself — every built-in agent's binary is
+/// named after it.
+fn agent_binary<'a>(bins: &'a HashMap<String, String>, agent: &'a str) -> &'a str {
+    bins.get(agent)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(agent)
+}
+
+fn build_agent_command(
+    agent: &str,
+    options: &SpecOptions,
+    args: &str,
+    name: &str,
+    bins: &HashMap<String, String>,
+) -> String {
     let args = args.trim();
+    let bin = agent_binary(bins, agent);
     match agent {
         "claude" => {
-            let mut parts: Vec<String> = vec!["claude".into()];
+            let mut parts: Vec<String> = vec![bin.into()];
             match options.claude.session_mode {
                 ClaudeSessionMode::New => {}
                 ClaudeSessionMode::Continue => parts.push("--continue".into()),
@@ -1065,7 +1086,17 @@ fn build_agent_command(agent: &str, options: &SpecOptions, args: &str, name: &st
             parts.join(" ")
         }
         "codex" => {
-            let mut parts: Vec<String> = vec!["codex".into()];
+            let mut parts: Vec<String> = vec![bin.into()];
+            match options.codex.session_mode {
+                ClaudeSessionMode::New => {}
+                // `codex resume --last` continues the most recent
+                // session; bare `codex resume` opens the picker.
+                ClaudeSessionMode::Continue => {
+                    parts.push("resume".into());
+                    parts.push("--last".into());
+                }
+                ClaudeSessionMode::Resume => parts.push("resume".into()),
+            }
             if options.codex.yolo {
                 parts.push("--yolo".into());
             }
@@ -1079,13 +1110,49 @@ fn build_agent_command(agent: &str, options: &SpecOptions, args: &str, name: &st
             // legacy `kimi-cli`). `--continue` resumes the working dir's
             // last session; `--session` with no id opens the interactive
             // session picker.
-            let mut parts: Vec<String> = vec!["kimi".into()];
+            let mut parts: Vec<String> = vec![bin.into()];
             match options.kimi.session_mode {
                 ClaudeSessionMode::New => {}
                 ClaudeSessionMode::Continue => parts.push("--continue".into()),
                 ClaudeSessionMode::Resume => parts.push("--session".into()),
             }
             if options.kimi.yolo {
+                parts.push("--yolo".into());
+            }
+            if !args.is_empty() {
+                parts.push(args.to_string());
+            }
+            parts.join(" ")
+        }
+        "opencode" => {
+            // OpenCode has no CLI session picker (`--session` needs an
+            // explicit id), so both Continue and a stray Resume map to
+            // `--continue` — the in-TUI session list covers the rest.
+            let mut parts: Vec<String> = vec![bin.into()];
+            match options.opencode.session_mode {
+                ClaudeSessionMode::New => {}
+                ClaudeSessionMode::Continue | ClaudeSessionMode::Resume => {
+                    parts.push("--continue".into())
+                }
+            }
+            if options.opencode.auto {
+                parts.push("--auto".into());
+            }
+            if !args.is_empty() {
+                parts.push(args.to_string());
+            }
+            parts.join(" ")
+        }
+        "qwen" => {
+            // Qwen Code: `--continue` resumes the working dir's most
+            // recent session; `--resume` with no id opens the picker.
+            let mut parts: Vec<String> = vec![bin.into()];
+            match options.qwen.session_mode {
+                ClaudeSessionMode::New => {}
+                ClaudeSessionMode::Continue => parts.push("--continue".into()),
+                ClaudeSessionMode::Resume => parts.push("--resume".into()),
+            }
+            if options.qwen.yolo {
                 parts.push("--yolo".into());
             }
             if !args.is_empty() {
@@ -1111,34 +1178,21 @@ fn build_launch_command(
     args: &str,
     name: &str,
     resume: bool,
+    bins: &HashMap<String, String>,
 ) -> String {
     if !resume {
-        return build_agent_command(agent, options, args, name);
+        return build_agent_command(agent, options, args, name, bins);
     }
+    let mut options = options.clone();
     match agent {
-        "claude" => {
-            let mut options = options.clone();
-            options.claude.session_mode = ClaudeSessionMode::Continue;
-            build_agent_command(agent, &options, args, name)
-        }
-        "codex" => {
-            let args = args.trim();
-            let mut parts: Vec<String> = vec!["codex".into(), "resume".into(), "--last".into()];
-            if options.codex.yolo {
-                parts.push("--yolo".into());
-            }
-            if !args.is_empty() {
-                parts.push(args.to_string());
-            }
-            parts.join(" ")
-        }
-        "kimi" => {
-            let mut options = options.clone();
-            options.kimi.session_mode = ClaudeSessionMode::Continue;
-            build_agent_command(agent, &options, args, name)
-        }
-        _ => build_agent_command(agent, options, args, name),
+        "claude" => options.claude.session_mode = ClaudeSessionMode::Continue,
+        "codex" => options.codex.session_mode = ClaudeSessionMode::Continue,
+        "kimi" => options.kimi.session_mode = ClaudeSessionMode::Continue,
+        "opencode" => options.opencode.session_mode = ClaudeSessionMode::Continue,
+        "qwen" => options.qwen.session_mode = ClaudeSessionMode::Continue,
+        _ => {}
     }
+    build_agent_command(agent, &options, args, name, bins)
 }
 
 async fn create_session(
@@ -1191,6 +1245,7 @@ async fn create_session(
             &spec.args,
             &spec.name,
             spec.resume,
+            &config.agent_binaries,
         )
     };
     let metadata = Some(spec_to_metadata(&spec));
@@ -1235,6 +1290,20 @@ async fn create_session(
     }
 }
 
+/// `ClaudeSessionMode` ↔ persisted-string mapping shared by every
+/// agent whose options reuse the tri-state enum.
+fn mode_to_str(mode: ClaudeSessionMode) -> String {
+    mode.label().to_string()
+}
+
+fn mode_from_str(s: &str) -> ClaudeSessionMode {
+    match s {
+        "Continue" => ClaudeSessionMode::Continue,
+        "Resume" => ClaudeSessionMode::Resume,
+        _ => ClaudeSessionMode::New,
+    }
+}
+
 /// Project a `SessionSpec` into the persisted tmux-options shape.
 fn spec_to_metadata(spec: &SessionSpec) -> SessionMetadata {
     SessionMetadata {
@@ -1242,19 +1311,16 @@ fn spec_to_metadata(spec: &SessionSpec) -> SessionMetadata {
         path: spec.path.clone(),
         agent: spec.agent.clone(),
         args: spec.args.clone(),
-        claude_session_mode: match spec.options.claude.session_mode {
-            ClaudeSessionMode::New => "New".to_string(),
-            ClaudeSessionMode::Continue => "Continue".to_string(),
-            ClaudeSessionMode::Resume => "Resume".to_string(),
-        },
+        claude_session_mode: mode_to_str(spec.options.claude.session_mode),
         claude_skip_permissions: spec.options.claude.skip_permissions,
+        codex_session_mode: mode_to_str(spec.options.codex.session_mode),
         codex_yolo: spec.options.codex.yolo,
-        kimi_session_mode: match spec.options.kimi.session_mode {
-            ClaudeSessionMode::New => "New".to_string(),
-            ClaudeSessionMode::Continue => "Continue".to_string(),
-            ClaudeSessionMode::Resume => "Resume".to_string(),
-        },
+        kimi_session_mode: mode_to_str(spec.options.kimi.session_mode),
         kimi_yolo: spec.options.kimi.yolo,
+        opencode_session_mode: mode_to_str(spec.options.opencode.session_mode),
+        opencode_auto: spec.options.opencode.auto,
+        qwen_session_mode: mode_to_str(spec.options.qwen.session_mode),
+        qwen_yolo: spec.options.qwen.yolo,
         container_id: spec.container_id.clone(),
         // By the time this runs inside `create_session`, `spec.path` has
         // already been repointed to the resolved worktree path (see the
@@ -1283,7 +1349,7 @@ fn resolve_worktree_path(
 /// Inverse of `spec_to_metadata` — rebuild a SessionSpec from the
 /// metadata we read off a live tmux session during restart.
 fn metadata_to_spec(meta: SessionMetadata) -> SessionSpec {
-    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions};
+    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions};
     SessionSpec {
         name: meta.display_name,
         path: meta.path,
@@ -1291,23 +1357,24 @@ fn metadata_to_spec(meta: SessionMetadata) -> SessionSpec {
         args: meta.args,
         options: SpecOptions {
             claude: ClaudeOptions {
-                session_mode: match meta.claude_session_mode.as_str() {
-                    "Continue" => ClaudeSessionMode::Continue,
-                    "Resume" => ClaudeSessionMode::Resume,
-                    _ => ClaudeSessionMode::New,
-                },
+                session_mode: mode_from_str(&meta.claude_session_mode),
                 skip_permissions: meta.claude_skip_permissions,
             },
             codex: CodexOptions {
+                session_mode: mode_from_str(&meta.codex_session_mode),
                 yolo: meta.codex_yolo,
             },
             kimi: KimiOptions {
-                session_mode: match meta.kimi_session_mode.as_str() {
-                    "Continue" => ClaudeSessionMode::Continue,
-                    "Resume" => ClaudeSessionMode::Resume,
-                    _ => ClaudeSessionMode::New,
-                },
+                session_mode: mode_from_str(&meta.kimi_session_mode),
                 yolo: meta.kimi_yolo,
+            },
+            opencode: OpencodeOptions {
+                session_mode: mode_from_str(&meta.opencode_session_mode),
+                auto: meta.opencode_auto,
+            },
+            qwen: QwenOptions {
+                session_mode: mode_from_str(&meta.qwen_session_mode),
+                yolo: meta.qwen_yolo,
             },
         },
         container_id: meta.container_id,
@@ -1736,15 +1803,22 @@ mod content_hash_tests {
 #[cfg(test)]
 mod build_cmd_tests {
     use super::*;
-    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions};
+    use crate::events::{ClaudeOptions, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions};
 
     fn opts() -> SpecOptions {
         SpecOptions::default()
     }
 
+    fn bins() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn claude_with_no_options_is_bare() {
-        assert_eq!(build_agent_command("claude", &opts(), "", ""), "claude");
+        assert_eq!(
+            build_agent_command("claude", &opts(), "", "", &bins()),
+            "claude"
+        );
     }
 
     #[test]
@@ -1752,7 +1826,7 @@ mod build_cmd_tests {
         let mut o = opts();
         o.claude.session_mode = ClaudeSessionMode::Continue;
         assert_eq!(
-            build_agent_command("claude", &o, "", ""),
+            build_agent_command("claude", &o, "", "", &bins()),
             "claude --continue"
         );
     }
@@ -1768,7 +1842,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "", ""),
+            build_agent_command("claude", &o, "", "", &bins()),
             "claude --resume --dangerously-skip-permissions"
         );
     }
@@ -1784,7 +1858,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus", ""),
+            build_agent_command("claude", &o, "--model=opus", "", &bins()),
             "claude --dangerously-skip-permissions --model=opus"
         );
     }
@@ -1792,7 +1866,7 @@ mod build_cmd_tests {
     #[test]
     fn claude_name_appends_slugified_display_name() {
         assert_eq!(
-            build_agent_command("claude", &opts(), "", "My Rocket Fox"),
+            build_agent_command("claude", &opts(), "", "My Rocket Fox", &bins()),
             "claude --name my-rocket-fox"
         );
     }
@@ -1807,7 +1881,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus", "Bosun Fix"),
+            build_agent_command("claude", &o, "--model=opus", "Bosun Fix", &bins()),
             "claude --continue --dangerously-skip-permissions --name bosun-fix --model=opus"
         );
     }
@@ -1817,44 +1891,182 @@ mod build_cmd_tests {
         // A user-supplied --name in the extra args wins; don't emit a
         // duplicate that commander would reject.
         assert_eq!(
-            build_agent_command("claude", &opts(), "--name custom", "My Session"),
+            build_agent_command("claude", &opts(), "--name custom", "My Session", &bins()),
             "claude --name custom"
         );
     }
 
     #[test]
     fn claude_name_skipped_when_slug_is_empty() {
-        assert_eq!(build_agent_command("claude", &opts(), "", "!!!"), "claude");
+        assert_eq!(
+            build_agent_command("claude", &opts(), "", "!!!", &bins()),
+            "claude"
+        );
     }
 
     #[test]
     fn launch_resume_keeps_claude_name() {
         // The `r` restart re-asserts the bosun name on the resumed session.
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "My Rocket Fox", true),
+            build_launch_command("claude", &opts(), "", "My Rocket Fox", true, &bins()),
             "claude --continue --name my-rocket-fox"
         );
     }
 
     #[test]
     fn name_ignored_for_other_agents() {
-        assert_eq!(build_agent_command("codex", &opts(), "", "My Fox"), "codex");
-        assert_eq!(build_agent_command("kimi", &opts(), "", "My Fox"), "kimi");
-        assert_eq!(build_agent_command("terminal", &opts(), "", "My Fox"), "");
+        assert_eq!(
+            build_agent_command("codex", &opts(), "", "My Fox", &bins()),
+            "codex"
+        );
+        assert_eq!(
+            build_agent_command("kimi", &opts(), "", "My Fox", &bins()),
+            "kimi"
+        );
+        assert_eq!(
+            build_agent_command("terminal", &opts(), "", "My Fox", &bins()),
+            ""
+        );
     }
 
     #[test]
     fn codex_yolo() {
         let o = SpecOptions {
-            codex: CodexOptions { yolo: true },
+            codex: CodexOptions {
+                yolo: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        assert_eq!(build_agent_command("codex", &o, "", ""), "codex --yolo");
+        assert_eq!(
+            build_agent_command("codex", &o, "", "", &bins()),
+            "codex --yolo"
+        );
+    }
+
+    #[test]
+    fn codex_continue_uses_resume_last() {
+        let o = SpecOptions {
+            codex: CodexOptions {
+                session_mode: ClaudeSessionMode::Continue,
+                yolo: false,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("codex", &o, "", "", &bins()),
+            "codex resume --last"
+        );
+    }
+
+    #[test]
+    fn codex_resume_opens_picker() {
+        let o = SpecOptions {
+            codex: CodexOptions {
+                session_mode: ClaudeSessionMode::Resume,
+                yolo: true,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("codex", &o, "", "", &bins()),
+            "codex resume --yolo"
+        );
+    }
+
+    #[test]
+    fn opencode_defaults_bare_and_continue_flags() {
+        assert_eq!(
+            build_agent_command("opencode", &opts(), "", "", &bins()),
+            "opencode"
+        );
+        let o = SpecOptions {
+            opencode: OpencodeOptions {
+                session_mode: ClaudeSessionMode::Continue,
+                auto: true,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("opencode", &o, "-m anthropic/claude", "", &bins()),
+            "opencode --continue --auto -m anthropic/claude"
+        );
+    }
+
+    #[test]
+    fn opencode_resume_maps_to_continue() {
+        // No CLI picker in opencode — a stray Resume mode degrades to
+        // `--continue` instead of emitting an invalid flag.
+        let o = SpecOptions {
+            opencode: OpencodeOptions {
+                session_mode: ClaudeSessionMode::Resume,
+                auto: false,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            build_agent_command("opencode", &o, "", "", &bins()),
+            "opencode --continue"
+        );
+    }
+
+    #[test]
+    fn qwen_modes_and_yolo() {
+        assert_eq!(
+            build_agent_command("qwen", &opts(), "", "", &bins()),
+            "qwen"
+        );
+        let mut o = opts();
+        o.qwen = QwenOptions {
+            session_mode: ClaudeSessionMode::Continue,
+            yolo: true,
+        };
+        assert_eq!(
+            build_agent_command("qwen", &o, "", "", &bins()),
+            "qwen --continue --yolo"
+        );
+        o.qwen.session_mode = ClaudeSessionMode::Resume;
+        assert_eq!(
+            build_agent_command("qwen", &o, "-m qwen3-coder-plus", "", &bins()),
+            "qwen --resume --yolo -m qwen3-coder-plus"
+        );
+    }
+
+    #[test]
+    fn binary_override_replaces_agent_binary() {
+        let mut b = bins();
+        b.insert("opencode".into(), "/Users/me/bin/opencode-wrapper".into());
+        assert_eq!(
+            build_agent_command("opencode", &opts(), "", "", &b),
+            "/Users/me/bin/opencode-wrapper"
+        );
+        // Other agents are untouched by an unrelated override.
+        assert_eq!(build_agent_command("claude", &opts(), "", "", &b), "claude");
+    }
+
+    #[test]
+    fn binary_override_applies_on_resume_launch() {
+        let mut b = bins();
+        b.insert("codex".into(), "codex-nightly".into());
+        assert_eq!(
+            build_launch_command("codex", &opts(), "", "", true, &b),
+            "codex-nightly resume --last"
+        );
+    }
+
+    #[test]
+    fn blank_binary_override_falls_back_to_agent_name() {
+        let mut b = bins();
+        b.insert("qwen".into(), "   ".into());
+        assert_eq!(build_agent_command("qwen", &opts(), "", "", &b), "qwen");
     }
 
     #[test]
     fn kimi_uses_kimi_binary_and_defaults_bare() {
-        assert_eq!(build_agent_command("kimi", &opts(), "", ""), "kimi");
+        assert_eq!(
+            build_agent_command("kimi", &opts(), "", "", &bins()),
+            "kimi"
+        );
     }
 
     #[test]
@@ -1867,7 +2079,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("kimi", &o, "-m k2", ""),
+            build_agent_command("kimi", &o, "-m k2", "", &bins()),
             "kimi --continue --yolo -m k2"
         );
     }
@@ -1881,7 +2093,10 @@ mod build_cmd_tests {
             },
             ..Default::default()
         };
-        assert_eq!(build_agent_command("kimi", &o, "", ""), "kimi --session");
+        assert_eq!(
+            build_agent_command("kimi", &o, "", "", &bins()),
+            "kimi --session"
+        );
     }
 
     #[test]
@@ -1896,7 +2111,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("kimi", &o, "", "", true),
+            build_launch_command("kimi", &o, "", "", true, &bins()),
             "kimi --continue --yolo"
         );
     }
@@ -1911,16 +2126,19 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("terminal", &o, "vim .zshrc", ""),
+            build_agent_command("terminal", &o, "vim .zshrc", "", &bins()),
             "vim .zshrc"
         );
-        assert_eq!(build_agent_command("terminal", &opts(), "", ""), "");
+        assert_eq!(
+            build_agent_command("terminal", &opts(), "", "", &bins()),
+            ""
+        );
     }
 
     #[test]
     fn launch_without_resume_matches_plain_build() {
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "", false),
+            build_launch_command("claude", &opts(), "", "", false, &bins()),
             "claude"
         );
     }
@@ -1930,7 +2148,7 @@ mod build_cmd_tests {
         // Persisted mode is the default (New); the one-shot resume
         // override swaps in `--continue` without touching the options.
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "", true),
+            build_launch_command("claude", &opts(), "", "", true, &bins()),
             "claude --continue"
         );
     }
@@ -1945,7 +2163,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("claude", &o, "--model=opus", "", true),
+            build_launch_command("claude", &o, "--model=opus", "", true, &bins()),
             "claude --continue --dangerously-skip-permissions --model=opus"
         );
     }
@@ -1953,7 +2171,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_uses_codex_resume_last() {
         assert_eq!(
-            build_launch_command("codex", &opts(), "", "", true),
+            build_launch_command("codex", &opts(), "", "", true, &bins()),
             "codex resume --last"
         );
     }
@@ -1961,11 +2179,14 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_codex_keeps_yolo_and_args() {
         let o = SpecOptions {
-            codex: CodexOptions { yolo: true },
+            codex: CodexOptions {
+                yolo: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("codex", &o, "--model gpt-5", "", true),
+            build_launch_command("codex", &o, "--model gpt-5", "", true, &bins()),
             "codex resume --last --yolo --model gpt-5"
         );
     }
@@ -1973,7 +2194,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_noop_for_terminal() {
         assert_eq!(
-            build_launch_command("terminal", &opts(), "vim .zshrc", "", true),
+            build_launch_command("terminal", &opts(), "vim .zshrc", "", true, &bins()),
             "vim .zshrc"
         );
     }

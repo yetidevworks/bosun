@@ -8,7 +8,8 @@ use rusqlite::params;
 
 use crate::error::Result;
 use crate::events::{
-    ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, SessionSpec, SpecOptions,
+    ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions,
+    SessionSpec, SpecOptions,
 };
 
 use super::{map_sql_err, Store};
@@ -24,6 +25,8 @@ pub struct Recent {
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub kimi: KimiOptions,
+    pub opencode: OpencodeOptions,
+    pub qwen: QwenOptions,
     pub last_used_at: i64,
     pub use_count: i64,
 }
@@ -43,6 +46,8 @@ impl Recent {
                 claude: self.claude.clone(),
                 codex: self.codex.clone(),
                 kimi: self.kimi.clone(),
+                opencode: self.opencode.clone(),
+                qwen: self.qwen.clone(),
             },
             container_id: None,
             resume: false,
@@ -61,9 +66,14 @@ impl Store {
         let now = now_millis();
         let session_mode = claude_mode_to_str(spec.options.claude.session_mode);
         let skip_perms = spec.options.claude.skip_permissions as i64;
+        let codex_mode = claude_mode_to_str(spec.options.codex.session_mode);
         let yolo = spec.options.codex.yolo as i64;
         let kimi_mode = claude_mode_to_str(spec.options.kimi.session_mode);
         let kimi_yolo = spec.options.kimi.yolo as i64;
+        let opencode_mode = claude_mode_to_str(spec.options.opencode.session_mode);
+        let opencode_auto = spec.options.opencode.auto as i64;
+        let qwen_mode = claude_mode_to_str(spec.options.qwen.session_mode);
+        let qwen_yolo = spec.options.qwen.yolo as i64;
 
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -72,9 +82,12 @@ impl Store {
                 name, path, agent, args,
                 claude_session_mode, claude_skip_permissions, codex_yolo,
                 kimi_session_mode, kimi_yolo,
+                codex_session_mode,
+                opencode_session_mode, opencode_auto,
+                qwen_session_mode, qwen_yolo,
                 last_used_at, use_count
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1)
             ON CONFLICT(name, path, agent) DO UPDATE SET
                 args                    = excluded.args,
                 claude_session_mode     = excluded.claude_session_mode,
@@ -82,6 +95,11 @@ impl Store {
                 codex_yolo              = excluded.codex_yolo,
                 kimi_session_mode       = excluded.kimi_session_mode,
                 kimi_yolo               = excluded.kimi_yolo,
+                codex_session_mode      = excluded.codex_session_mode,
+                opencode_session_mode   = excluded.opencode_session_mode,
+                opencode_auto           = excluded.opencode_auto,
+                qwen_session_mode       = excluded.qwen_session_mode,
+                qwen_yolo               = excluded.qwen_yolo,
                 last_used_at            = excluded.last_used_at,
                 use_count               = use_count + 1
             "#,
@@ -95,6 +113,11 @@ impl Store {
                 yolo,
                 kimi_mode,
                 kimi_yolo,
+                codex_mode,
+                opencode_mode,
+                opencode_auto,
+                qwen_mode,
+                qwen_yolo,
                 now,
             ],
         )
@@ -112,6 +135,9 @@ impl Store {
                     id, name, path, agent, args,
                     claude_session_mode, claude_skip_permissions, codex_yolo,
                     kimi_session_mode, kimi_yolo,
+                    codex_session_mode,
+                    opencode_session_mode, opencode_auto,
+                    qwen_session_mode, qwen_yolo,
                     last_used_at, use_count
                 FROM recents
                 ORDER BY last_used_at DESC
@@ -126,6 +152,11 @@ impl Store {
                 let codex_yolo: i64 = row.get(7)?;
                 let kimi_mode_str: String = row.get(8)?;
                 let kimi_yolo: i64 = row.get(9)?;
+                let codex_mode_str: String = row.get(10)?;
+                let opencode_mode_str: String = row.get(11)?;
+                let opencode_auto: i64 = row.get(12)?;
+                let qwen_mode_str: String = row.get(13)?;
+                let qwen_yolo: i64 = row.get(14)?;
                 Ok(Recent {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -137,14 +168,23 @@ impl Store {
                         skip_permissions: claude_skip != 0,
                     },
                     codex: CodexOptions {
+                        session_mode: claude_mode_from_str(&codex_mode_str),
                         yolo: codex_yolo != 0,
                     },
                     kimi: KimiOptions {
                         session_mode: claude_mode_from_str(&kimi_mode_str),
                         yolo: kimi_yolo != 0,
                     },
-                    last_used_at: row.get(10)?,
-                    use_count: row.get(11)?,
+                    opencode: OpencodeOptions {
+                        session_mode: claude_mode_from_str(&opencode_mode_str),
+                        auto: opencode_auto != 0,
+                    },
+                    qwen: QwenOptions {
+                        session_mode: claude_mode_from_str(&qwen_mode_str),
+                        yolo: qwen_yolo != 0,
+                    },
+                    last_used_at: row.get(15)?,
+                    use_count: row.get(16)?,
                 })
             })
             .map_err(map_sql_err)?;
@@ -301,13 +341,15 @@ mod tests {
     }
 
     #[test]
-    fn recent_roundtrip_codex_yolo() {
+    fn recent_roundtrip_codex_options() {
         let s = Store::in_memory().unwrap();
         let mut sp = spec("ops", "/srv", "codex");
         sp.options.codex.yolo = true;
+        sp.options.codex.session_mode = ClaudeSessionMode::Resume;
         s.upsert_recent(&sp).unwrap();
         let got = &s.list_recents(1).unwrap()[0];
         assert!(got.codex.yolo);
+        assert_eq!(got.codex.session_mode, ClaudeSessionMode::Resume);
     }
 
     #[test]
@@ -320,6 +362,30 @@ mod tests {
         let got = &s.list_recents(1).unwrap()[0];
         assert!(got.kimi.yolo);
         assert_eq!(got.kimi.session_mode, ClaudeSessionMode::Continue);
+    }
+
+    #[test]
+    fn recent_roundtrip_opencode_options() {
+        let s = Store::in_memory().unwrap();
+        let mut sp = spec("oc", "/srv", "opencode");
+        sp.options.opencode.auto = true;
+        sp.options.opencode.session_mode = ClaudeSessionMode::Continue;
+        s.upsert_recent(&sp).unwrap();
+        let got = &s.list_recents(1).unwrap()[0];
+        assert!(got.opencode.auto);
+        assert_eq!(got.opencode.session_mode, ClaudeSessionMode::Continue);
+    }
+
+    #[test]
+    fn recent_roundtrip_qwen_options() {
+        let s = Store::in_memory().unwrap();
+        let mut sp = spec("qc", "/srv", "qwen");
+        sp.options.qwen.yolo = true;
+        sp.options.qwen.session_mode = ClaudeSessionMode::Resume;
+        s.upsert_recent(&sp).unwrap();
+        let got = &s.list_recents(1).unwrap()[0];
+        assert!(got.qwen.yolo);
+        assert_eq!(got.qwen.session_mode, ClaudeSessionMode::Resume);
     }
 
     #[test]
@@ -372,6 +438,8 @@ mod tests {
             },
             codex: CodexOptions::default(),
             kimi: KimiOptions::default(),
+            opencode: OpencodeOptions::default(),
+            qwen: QwenOptions::default(),
             last_used_at: 123,
             use_count: 7,
         };

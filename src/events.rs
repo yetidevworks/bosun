@@ -55,6 +55,8 @@ pub struct SpecOptions {
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub kimi: KimiOptions,
+    pub opencode: OpencodeOptions,
+    pub qwen: QwenOptions,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -97,6 +99,10 @@ impl ClaudeSessionMode {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexOptions {
+    /// New (`codex`) / Continue (`codex resume --last`) / Resume
+    /// (`codex resume` — interactive picker). Same tri-state as
+    /// Claude, so `ClaudeSessionMode` is reused.
+    pub session_mode: ClaudeSessionMode,
     /// Codex `--yolo` — bypass approvals and sandbox. Dangerous.
     pub yolo: bool,
 }
@@ -108,6 +114,29 @@ pub struct KimiOptions {
     /// `ClaudeSessionMode` rather than duplicate the enum.
     pub session_mode: ClaudeSessionMode,
     /// kimi `--yolo` — auto-approve all actions. Dangerous.
+    pub yolo: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpencodeOptions {
+    /// New (`opencode`) / Continue (`opencode --continue`). OpenCode
+    /// has no CLI session picker (`--session` needs an explicit id;
+    /// the picker lives inside its TUI), so the modal only offers
+    /// New/Continue — `Resume` is mapped to Continue defensively if
+    /// it ever reaches the command builder.
+    pub session_mode: ClaudeSessionMode,
+    /// opencode `--auto` — auto-approve permissions that are not
+    /// explicitly denied. Dangerous.
+    pub auto: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QwenOptions {
+    /// New / Continue (`--continue`) / Resume (`--resume`, which
+    /// opens Qwen's session picker when given no id). Same tri-state
+    /// as Claude, so `ClaudeSessionMode` is reused.
+    pub session_mode: ClaudeSessionMode,
+    /// qwen `--yolo` — auto-approve all actions. Dangerous.
     pub yolo: bool,
 }
 

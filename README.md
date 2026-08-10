@@ -6,7 +6,8 @@ Tmux-native orchestrator for AI agent sessions. Written in Rust with
 [ratatui](https://ratatui.rs/).
 
 Bosun lists, previews, creates, and manages tmux sessions running AI coding
-agents (Claude Code, Codex, or a plain shell) from a single terminal UI. It
+agents (Claude Code, Codex, Kimi Code, OpenCode, Qwen Code, or a plain
+shell) from a single terminal UI. It
 was built as a from-scratch reimagining of
 [agent-deck](https://github.com/yetidevworks/agent-deck) — same workflow, new
 architecture, designed around a few rules that keep it simple and robust:
@@ -109,8 +110,12 @@ you can click into and drive without leaving bosun.
 - Sections for organizing sessions, collapsible, persisted in
   `config.toml`
 - Create new bosun-managed sessions from a modal form: name, path, agent
-  choice, and agent-specific options (Claude `--continue` / `--resume` /
-  skip-permissions, Codex `--yolo`)
+  choice (Claude Code, Codex, Kimi Code, OpenCode, Qwen Code, plain
+  terminal), and agent-specific options — every agent gets a
+  New/Continue/Resume session radio (Continue reopens the working
+  directory's last session, Resume opens the agent's session picker
+  where one exists) plus its auto-approve flag (Claude
+  skip-permissions, Codex/Kimi/Qwen `--yolo`, OpenCode `--auto`)
 - Optional git worktree sessions — create a session in a fresh worktree
   on a new branch, then on kill choose to merge, remove, or keep it
 - Filesystem tab-completion in the path field (shell-style LCP matching
@@ -374,10 +379,10 @@ preview tick (default 200 ms) for every managed session, not just the
 focused one, so a multi-agent dashboard reflects state in near
 real-time.
 
-Detectors are stacked by priority (Claude > Codex > generic). Each
-looks at the bottom region of the visible pane capture — Claude's
-prompt box, Codex's working line — rather than substring-scanning the
-whole screen. Older "Thinking…" lines that scrolled past the prompt no
+Detectors are stacked by priority (Claude > Codex > Kimi > OpenCode >
+Qwen > generic). Each looks at the bottom region of the visible pane
+capture — Claude's prompt box, Codex's working line — rather than
+substring-scanning the whole screen. Older "Thinking…" lines that scrolled past the prompt no
 longer pin the glyph to Running.
 
 Transitions are smoothed:
@@ -485,6 +490,15 @@ embed_enabled    = true         # set false to fall back to the polled-snapshot 
 show_group_in_title = false      # prefix grouped sessions as "group/session" in tab pills and terminal title
 editor           = "zed"        # set via `bosun editor <cmd>`; used by the `e` key
 banner_font      = "newsx"      # section banner font; cycled with `f` on a header
+
+# Optional per-agent binary overrides. The value replaces the agent's
+# binary in the launch command, so you can point an agent at a wrapper
+# script (e.g. one that unsets GIT_EXTERNAL_DIFF before exec'ing the
+# real binary) or a differently-named install. Have the wrapper `exec`
+# the real binary so status detection still sees the agent process.
+[agents]
+opencode = "/Users/me/bin/opencode-wrapper"
+codex    = "codex-nightly"
 ```
 
 Sections, per-section font overrides, sidebar membership, session
@@ -589,6 +603,9 @@ src/
       mod.rs                 registry + ANSI strip helper
       claude.rs              prompt-box-aware Claude Code detector
       codex.rs               Codex CLI detector
+      kimi.rs                Kimi Code detector
+      opencode.rs            OpenCode detector
+      qwen.rs                Qwen Code detector
       generic.rs             activity-age fallback
     session.rs
   actors/

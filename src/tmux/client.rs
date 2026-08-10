@@ -48,9 +48,14 @@ pub struct SessionMetadata {
     pub args: String,
     pub claude_session_mode: String,
     pub claude_skip_permissions: bool,
+    pub codex_session_mode: String,
     pub codex_yolo: bool,
     pub kimi_session_mode: String,
     pub kimi_yolo: bool,
+    pub opencode_session_mode: String,
+    pub opencode_auto: bool,
+    pub qwen_session_mode: String,
+    pub qwen_yolo: bool,
     /// Sidebar container this session belongs to (tabs feature).
     /// `None` when this session is its own row.
     pub container_id: Option<String>,
@@ -489,7 +494,7 @@ impl TmuxClient for TokioTmuxClient {
         // `tmux::parse::LIST_SESSIONS_FORMAT`.
         const SEP: &str = "|||";
         let fmt = format!(
-            "#{{@bosun_display}}{SEP}#{{@bosun_path}}{SEP}#{{@bosun_agent}}{SEP}#{{@bosun_args}}{SEP}#{{@bosun_claude_session_mode}}{SEP}#{{@bosun_claude_skip_permissions}}{SEP}#{{@bosun_codex_yolo}}{SEP}#{{@bosun_container_id}}{SEP}#{{@bosun_worktree_path}}{SEP}#{{@bosun_branch}}{SEP}#{{@bosun_kimi_session_mode}}{SEP}#{{@bosun_kimi_yolo}}",
+            "#{{@bosun_display}}{SEP}#{{@bosun_path}}{SEP}#{{@bosun_agent}}{SEP}#{{@bosun_args}}{SEP}#{{@bosun_claude_session_mode}}{SEP}#{{@bosun_claude_skip_permissions}}{SEP}#{{@bosun_codex_yolo}}{SEP}#{{@bosun_container_id}}{SEP}#{{@bosun_worktree_path}}{SEP}#{{@bosun_branch}}{SEP}#{{@bosun_kimi_session_mode}}{SEP}#{{@bosun_kimi_yolo}}{SEP}#{{@bosun_codex_session_mode}}{SEP}#{{@bosun_opencode_session_mode}}{SEP}#{{@bosun_opencode_auto}}{SEP}#{{@bosun_qwen_session_mode}}{SEP}#{{@bosun_qwen_yolo}}",
             SEP = SEP
         );
         let mut cmd = self.cmd();
@@ -911,6 +916,20 @@ fn metadata_options(m: &SessionMetadata) -> Vec<(&'static str, String)> {
             "@bosun_kimi_yolo",
             if m.kimi_yolo { "1" } else { "0" }.to_string(),
         ),
+        ("@bosun_codex_session_mode", m.codex_session_mode.clone()),
+        (
+            "@bosun_opencode_session_mode",
+            m.opencode_session_mode.clone(),
+        ),
+        (
+            "@bosun_opencode_auto",
+            if m.opencode_auto { "1" } else { "0" }.to_string(),
+        ),
+        ("@bosun_qwen_session_mode", m.qwen_session_mode.clone()),
+        (
+            "@bosun_qwen_yolo",
+            if m.qwen_yolo { "1" } else { "0" }.to_string(),
+        ),
     ];
     // Only emit `@bosun_container_id` when a container assignment
     // is requested — leaves pre-feature sessions clean and avoids
@@ -938,18 +957,19 @@ fn metadata_options(m: &SessionMetadata) -> Vec<(&'static str, String)> {
 /// Field order mirrors the read format string in `get_session_metadata`:
 /// `display | path | agent | args | claude_session_mode |
 /// claude_skip_permissions | codex_yolo | container_id | worktree_path |
-/// branch | kimi_session_mode | kimi_yolo`.
+/// branch | kimi_session_mode | kimi_yolo | codex_session_mode |
+/// opencode_session_mode | opencode_auto | qwen_session_mode | qwen_yolo`.
 fn parse_metadata_line(line: &str, sep: &str) -> Option<SessionMetadata> {
     let parts: Vec<&str> = line.split(sep).collect();
-    // Accept the legacy 7-field shape (pre-container_id sessions),
-    // the 8-field shape (container_id added), the 9/10-field shapes
-    // (worktree_path + branch added), and the 11/12-field shapes
-    // (kimi_session_mode + kimi_yolo added) — keeps sessions created
-    // by an older bosun usable after upgrade. Widening this matters:
-    // after appending the two kimi fields to the read format,
-    // metadata-aware sessions emit 12 fields, so a narrower guard
-    // would reject every session and silently disable restart/modify.
-    if !matches!(parts.len(), 7..=12) {
+    // Accept every historical field count: 7 (pre-container_id), 8
+    // (container_id added), 9/10 (worktree_path + branch), 11/12
+    // (kimi_session_mode + kimi_yolo), and 13..=17 (codex_session_mode,
+    // opencode + qwen fields) — keeps sessions created by an older
+    // bosun usable after upgrade. Widening this matters: after
+    // appending fields to the read format, metadata-aware sessions
+    // emit the full count, so a narrower guard would reject every
+    // session and silently disable restart/modify.
+    if !matches!(parts.len(), 7..=17) {
         return None;
     }
     // Agent is the required anchor — if it's empty, this session
@@ -987,6 +1007,20 @@ fn parse_metadata_line(line: &str, sep: &str) -> Option<SessionMetadata> {
             _ => "New".to_string(),
         },
         kimi_yolo: parts.get(11) == Some(&"1"),
+        codex_session_mode: match parts.get(12) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "New".to_string(),
+        },
+        opencode_session_mode: match parts.get(13) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "New".to_string(),
+        },
+        opencode_auto: parts.get(14) == Some(&"1"),
+        qwen_session_mode: match parts.get(15) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "New".to_string(),
+        },
+        qwen_yolo: parts.get(16) == Some(&"1"),
     })
 }
 
@@ -1068,6 +1102,41 @@ mod tests {
         assert_eq!(m.agent, "kimi");
         assert_eq!(m.kimi_session_mode, "Continue");
         assert!(m.kimi_yolo);
+    }
+
+    #[test]
+    fn parse_metadata_full_17_field_line_round_trips_new_agents() {
+        // display|path|agent|args|mode|skip|yolo|container|worktree|branch|
+        // kimi_mode|kimi_yolo|codex_mode|opencode_mode|opencode_auto|
+        // qwen_mode|qwen_yolo
+        let line = [
+            "Multi", "/tmp/x", "opencode", "", "New", "0", "0", "", "", "", "New", "0", "Resume",
+            "Continue", "1", "Resume", "1",
+        ]
+        .join(SEP);
+        let m = parse_metadata_line(&line, SEP).expect("17-field metadata parses");
+        assert_eq!(m.agent, "opencode");
+        assert_eq!(m.codex_session_mode, "Resume");
+        assert_eq!(m.opencode_session_mode, "Continue");
+        assert!(m.opencode_auto);
+        assert_eq!(m.qwen_session_mode, "Resume");
+        assert!(m.qwen_yolo);
+    }
+
+    #[test]
+    fn parse_metadata_12_field_line_defaults_new_agent_fields() {
+        // A session persisted by a pre-opencode/qwen bosun emits 12
+        // fields — the trailing agent fields default to New / false.
+        let line = [
+            "Moon", "/tmp/m", "kimi", "", "New", "0", "0", "", "", "", "Continue", "1",
+        ]
+        .join(SEP);
+        let m = parse_metadata_line(&line, SEP).expect("12-field metadata parses");
+        assert_eq!(m.codex_session_mode, "New");
+        assert_eq!(m.opencode_session_mode, "New");
+        assert!(!m.opencode_auto);
+        assert_eq!(m.qwen_session_mode, "New");
+        assert!(!m.qwen_yolo);
     }
 
     #[test]

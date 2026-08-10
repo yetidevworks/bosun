@@ -14,8 +14,8 @@ use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::events::{
-    ClaudeOptions, ClaudeSessionMode, CodexOptions, Command, KimiOptions, SessionSpec, SpecOptions,
-    WorktreeSpec,
+    ClaudeOptions, ClaudeSessionMode, CodexOptions, Command, KimiOptions, OpencodeOptions,
+    QwenOptions, SessionSpec, SpecOptions, WorktreeSpec,
 };
 use crate::store::Recent;
 use crate::ui::Theme;
@@ -34,7 +34,7 @@ const DROPDOWN_MAX_VISIBLE: usize = 8;
 
 // --- Agent dropdown --------------------------------------------------
 
-pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "terminal"];
+pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "opencode", "qwen", "terminal"];
 
 // --- Modal state -----------------------------------------------------
 
@@ -50,10 +50,17 @@ enum Field {
     ClaudeSession,
     ClaudeSkipPerm,
     // Codex-only
+    CodexSession,
     CodexYolo,
     // Kimi-only
     KimiSession,
     KimiYolo,
+    // OpenCode-only
+    OpencodeSession,
+    OpencodeAuto,
+    // Qwen-only
+    QwenSession,
+    QwenYolo,
 }
 
 impl Field {
@@ -82,11 +89,20 @@ impl Field {
                 v.push(Field::ClaudeSkipPerm);
             }
             "codex" => {
+                v.push(Field::CodexSession);
                 v.push(Field::CodexYolo);
             }
             "kimi" => {
                 v.push(Field::KimiSession);
                 v.push(Field::KimiYolo);
+            }
+            "opencode" => {
+                v.push(Field::OpencodeSession);
+                v.push(Field::OpencodeAuto);
+            }
+            "qwen" => {
+                v.push(Field::QwenSession);
+                v.push(Field::QwenYolo);
             }
             _ => {}
         }
@@ -113,6 +129,8 @@ pub struct NewSessionModal {
     claude: ClaudeOptions,
     codex: CodexOptions,
     kimi: KimiOptions,
+    opencode: OpencodeOptions,
+    qwen: QwenOptions,
     field: Field,
     error: Option<String>,
     /// Recents cached at modal construction time, used when the user
@@ -187,6 +205,8 @@ impl NewSessionModal {
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
             kimi: KimiOptions::default(),
+            opencode: OpencodeOptions::default(),
+            qwen: QwenOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -219,6 +239,8 @@ impl NewSessionModal {
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
             kimi: KimiOptions::default(),
+            opencode: OpencodeOptions::default(),
+            qwen: QwenOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -255,6 +277,8 @@ impl NewSessionModal {
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
             kimi: KimiOptions::default(),
+            opencode: OpencodeOptions::default(),
+            qwen: QwenOptions::default(),
             field: Field::Name,
             error: None,
             recents,
@@ -367,6 +391,8 @@ impl NewSessionModal {
         self.claude = spec.options.claude;
         self.codex = spec.options.codex;
         self.kimi = spec.options.kimi;
+        self.opencode = spec.options.opencode;
+        self.qwen = spec.options.qwen;
         if let Some(idx) = AGENTS.iter().position(|a| *a == spec.agent) {
             self.agent_idx = idx;
         }
@@ -465,6 +491,16 @@ impl NewSessionModal {
                     self.kimi = r.kimi.clone();
                 }
             }
+            "opencode" => {
+                if let Some(r) = self.recents.iter().find(|r| r.agent == "opencode") {
+                    self.opencode = r.opencode.clone();
+                }
+            }
+            "qwen" => {
+                if let Some(r) = self.recents.iter().find(|r| r.agent == "qwen") {
+                    self.qwen = r.qwen.clone();
+                }
+            }
             _ => {}
         }
     }
@@ -498,9 +534,11 @@ impl NewSessionModal {
 
         // Agent-specific options.
         match self.agent() {
-            "claude" => h += 4, // blank + header + radio + checkbox
-            "codex" => h += 3,  // blank + header + checkbox
-            "kimi" => h += 4,   // blank + header + radio + checkbox
+            "claude" => h += 4,   // blank + header + radio + checkbox
+            "codex" => h += 4,    // blank + header + radio + checkbox
+            "kimi" => h += 4,     // blank + header + radio + checkbox
+            "opencode" => h += 4, // blank + header + radio + checkbox
+            "qwen" => h += 4,     // blank + header + radio + checkbox
             _ => {}
         }
 
@@ -566,6 +604,8 @@ impl NewSessionModal {
                 claude: self.claude.clone(),
                 codex: self.codex.clone(),
                 kimi: self.kimi.clone(),
+                opencode: self.opencode.clone(),
+                qwen: self.qwen.clone(),
             },
             container_id: self.add_tab_to.clone(),
             resume: false,
@@ -676,8 +716,18 @@ impl Modal for NewSessionModal {
                     Field::ClaudeSession => {
                         self.claude.session_mode = self.claude.session_mode.prev();
                     }
+                    Field::CodexSession => {
+                        self.codex.session_mode = self.codex.session_mode.prev();
+                    }
                     Field::KimiSession => {
                         self.kimi.session_mode = self.kimi.session_mode.prev();
+                    }
+                    Field::OpencodeSession => {
+                        self.opencode.session_mode =
+                            opencode_mode_toggled(self.opencode.session_mode);
+                    }
+                    Field::QwenSession => {
+                        self.qwen.session_mode = self.qwen.session_mode.prev();
                     }
                     _ => {}
                 }
@@ -692,8 +742,18 @@ impl Modal for NewSessionModal {
                     Field::ClaudeSession => {
                         self.claude.session_mode = self.claude.session_mode.next();
                     }
+                    Field::CodexSession => {
+                        self.codex.session_mode = self.codex.session_mode.next();
+                    }
                     Field::KimiSession => {
                         self.kimi.session_mode = self.kimi.session_mode.next();
+                    }
+                    Field::OpencodeSession => {
+                        self.opencode.session_mode =
+                            opencode_mode_toggled(self.opencode.session_mode);
+                    }
+                    Field::QwenSession => {
+                        self.qwen.session_mode = self.qwen.session_mode.next();
                     }
                     _ => {}
                 }
@@ -779,13 +839,32 @@ impl Modal for NewSessionModal {
                     Field::KimiYolo => {
                         self.kimi.yolo = !self.kimi.yolo;
                     }
+                    Field::OpencodeAuto => {
+                        self.opencode.auto = !self.opencode.auto;
+                    }
+                    Field::QwenYolo => {
+                        self.qwen.yolo = !self.qwen.yolo;
+                    }
                     Field::ClaudeSession => {
                         // Space on a radio cycles forward, matching Right.
                         self.claude.session_mode = self.claude.session_mode.next();
                     }
+                    Field::CodexSession => {
+                        // Space on a radio cycles forward, matching Right.
+                        self.codex.session_mode = self.codex.session_mode.next();
+                    }
                     Field::KimiSession => {
                         // Space on a radio cycles forward, matching Right.
                         self.kimi.session_mode = self.kimi.session_mode.next();
+                    }
+                    Field::OpencodeSession => {
+                        // Two-state radio: Space toggles, matching Right.
+                        self.opencode.session_mode =
+                            opencode_mode_toggled(self.opencode.session_mode);
+                    }
+                    Field::QwenSession => {
+                        // Space on a radio cycles forward, matching Right.
+                        self.qwen.session_mode = self.qwen.session_mode.next();
                     }
                 }
                 ModalResult::Consumed
@@ -955,6 +1034,11 @@ impl Modal for NewSessionModal {
             "codex" => {
                 lines.push(Line::from(""));
                 lines.push(section_header("— Codex options —", theme));
+                lines.push(session_radio_line(
+                    self.codex.session_mode,
+                    self.field == Field::CodexSession,
+                    theme,
+                ));
                 lines.push(checkbox_line(
                     "YOLO mode (--yolo · bypass approvals & sandbox)",
                     self.codex.yolo,
@@ -974,6 +1058,37 @@ impl Modal for NewSessionModal {
                     "YOLO mode (--yolo · auto-approve all actions)",
                     self.kimi.yolo,
                     self.field == Field::KimiYolo,
+                    theme,
+                ));
+            }
+            "opencode" => {
+                lines.push(Line::from(""));
+                lines.push(section_header("— OpenCode options —", theme));
+                lines.push(session_radio_line_modes(
+                    self.opencode.session_mode,
+                    &[ClaudeSessionMode::New, ClaudeSessionMode::Continue],
+                    self.field == Field::OpencodeSession,
+                    theme,
+                ));
+                lines.push(checkbox_line(
+                    "Auto mode (--auto · auto-approve permissions)",
+                    self.opencode.auto,
+                    self.field == Field::OpencodeAuto,
+                    theme,
+                ));
+            }
+            "qwen" => {
+                lines.push(Line::from(""));
+                lines.push(section_header("— Qwen options —", theme));
+                lines.push(session_radio_line(
+                    self.qwen.session_mode,
+                    self.field == Field::QwenSession,
+                    theme,
+                ));
+                lines.push(checkbox_line(
+                    "YOLO mode (--yolo · auto-approve all actions)",
+                    self.qwen.yolo,
+                    self.field == Field::QwenYolo,
                     theme,
                 ));
             }
@@ -1289,7 +1404,37 @@ fn checkbox_line(label: &str, checked: bool, focused: bool, theme: &Theme) -> Li
     ])
 }
 
+/// The New/Continue toggle for OpenCode's two-state session radio —
+/// its CLI has no picker, so `Resume` is never offered and cycling in
+/// either direction just flips between the two states.
+fn opencode_mode_toggled(mode: ClaudeSessionMode) -> ClaudeSessionMode {
+    match mode {
+        ClaudeSessionMode::New => ClaudeSessionMode::Continue,
+        _ => ClaudeSessionMode::New,
+    }
+}
+
 fn session_radio_line(mode: ClaudeSessionMode, focused: bool, theme: &Theme) -> Line<'static> {
+    session_radio_line_modes(
+        mode,
+        &[
+            ClaudeSessionMode::New,
+            ClaudeSessionMode::Continue,
+            ClaudeSessionMode::Resume,
+        ],
+        focused,
+        theme,
+    )
+}
+
+/// Render the session radio with an explicit option set — agents
+/// without a CLI session picker (OpenCode) offer only New/Continue.
+fn session_radio_line_modes(
+    mode: ClaudeSessionMode,
+    modes: &[ClaudeSessionMode],
+    focused: bool,
+    theme: &Theme,
+) -> Line<'static> {
     let body_bg = theme.panel_alt;
     let marker = if focused { "▸" } else { " " };
     let marker_style = if focused {
@@ -1313,11 +1458,7 @@ fn session_radio_line(mode: ClaudeSessionMode, focused: bool, theme: &Theme) -> 
         Span::styled(format!(" {} ", marker), marker_style),
         Span::styled("Session  ", label_style),
     ];
-    for option in [
-        ClaudeSessionMode::New,
-        ClaudeSessionMode::Continue,
-        ClaudeSessionMode::Resume,
-    ] {
+    for &option in modes {
         let selected = option == mode;
         let (dot, val_style) = if selected {
             let style = if focused {
@@ -1460,10 +1601,64 @@ mod tests {
         m.handle(key(KeyCode::Tab)); // Path -> Worktree
         m.handle(key(KeyCode::Tab)); // Worktree -> Agent
         m.handle(key(KeyCode::Tab)); // Agent -> Args
-        m.handle(key(KeyCode::Tab)); // Args -> CodexYolo
+        m.handle(key(KeyCode::Tab)); // Args -> CodexSession
+        assert_eq!(m.field, Field::CodexSession);
+        m.handle(key(KeyCode::Tab)); // CodexSession -> CodexYolo
         assert_eq!(m.field, Field::CodexYolo);
         m.handle(key(KeyCode::Tab));
         assert_eq!(m.field, Field::Name);
+    }
+
+    #[test]
+    fn tab_cycles_fields_for_opencode() {
+        let mut m = modal_for_field_tests();
+        let idx = AGENTS.iter().position(|a| *a == "opencode").unwrap();
+        m.agent_idx = idx;
+        assert_eq!(m.agent(), "opencode");
+        m.handle(key(KeyCode::Tab)); // Name -> Path
+        m.handle(key(KeyCode::Tab)); // Path -> Worktree
+        m.handle(key(KeyCode::Tab)); // Worktree -> Agent
+        m.handle(key(KeyCode::Tab)); // Agent -> Args
+        m.handle(key(KeyCode::Tab)); // Args -> OpencodeSession
+        assert_eq!(m.field, Field::OpencodeSession);
+        m.handle(key(KeyCode::Tab)); // OpencodeSession -> OpencodeAuto
+        assert_eq!(m.field, Field::OpencodeAuto);
+        m.handle(key(KeyCode::Tab));
+        assert_eq!(m.field, Field::Name);
+    }
+
+    #[test]
+    fn tab_cycles_fields_for_qwen() {
+        let mut m = modal_for_field_tests();
+        let idx = AGENTS.iter().position(|a| *a == "qwen").unwrap();
+        m.agent_idx = idx;
+        assert_eq!(m.agent(), "qwen");
+        m.handle(key(KeyCode::Tab)); // Name -> Path
+        m.handle(key(KeyCode::Tab)); // Path -> Worktree
+        m.handle(key(KeyCode::Tab)); // Worktree -> Agent
+        m.handle(key(KeyCode::Tab)); // Agent -> Args
+        m.handle(key(KeyCode::Tab)); // Args -> QwenSession
+        assert_eq!(m.field, Field::QwenSession);
+        m.handle(key(KeyCode::Tab)); // QwenSession -> QwenYolo
+        assert_eq!(m.field, Field::QwenYolo);
+        m.handle(key(KeyCode::Tab));
+        assert_eq!(m.field, Field::Name);
+    }
+
+    #[test]
+    fn opencode_session_radio_toggles_two_states() {
+        let mut m = modal_for_field_tests();
+        let idx = AGENTS.iter().position(|a| *a == "opencode").unwrap();
+        m.agent_idx = idx;
+        m.field = Field::OpencodeSession;
+        assert_eq!(m.opencode.session_mode, ClaudeSessionMode::New);
+        m.handle(key(KeyCode::Right));
+        assert_eq!(m.opencode.session_mode, ClaudeSessionMode::Continue);
+        // Right again wraps back to New — Resume is never offered.
+        m.handle(key(KeyCode::Right));
+        assert_eq!(m.opencode.session_mode, ClaudeSessionMode::New);
+        m.handle(key(KeyCode::Left));
+        assert_eq!(m.opencode.session_mode, ClaudeSessionMode::Continue);
     }
 
     #[test]
@@ -1715,6 +1910,10 @@ mod tests {
         m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "kimi");
         m.handle(key(KeyCode::Right));
+        assert_eq!(m.agent(), "opencode");
+        m.handle(key(KeyCode::Right));
+        assert_eq!(m.agent(), "qwen");
+        m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "terminal");
         m.handle(key(KeyCode::Right));
         assert_eq!(m.agent(), "claude");
@@ -1806,6 +2005,8 @@ mod tests {
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
             kimi: KimiOptions::default(),
+            opencode: OpencodeOptions::default(),
+            qwen: QwenOptions::default(),
             last_used_at: 0,
             use_count: 1,
         };
@@ -1849,8 +2050,13 @@ mod tests {
             args: "--verbose".into(),
             options: SpecOptions {
                 claude: ClaudeOptions::default(),
-                codex: CodexOptions { yolo: true },
+                codex: CodexOptions {
+                    yolo: true,
+                    ..Default::default()
+                },
                 kimi: KimiOptions::default(),
+                opencode: OpencodeOptions::default(),
+                qwen: QwenOptions::default(),
             },
             container_id: None,
             resume: false,
