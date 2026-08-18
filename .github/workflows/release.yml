@@ -293,6 +293,8 @@ jobs:
             "  license \"MIT\"" \
             "  version \"${VER}\"" \
             "" \
+            "  depends_on \"tmux\"" \
+            "" \
             "  if OS.mac?" \
             "    if Hardware::CPU.arm?" \
             "      url \"${TAP_URL}/bosun-darwin-aarch64.tar.gz\"" \

@@ -75,6 +75,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Everything past this point shells out to tmux, so a missing
+    // binary should fail here with install instructions — not as a
+    // bare io::Error after we've already entered the alternate screen.
+    ensure_tmux_installed();
+
     init_tracing();
 
     let config = Config::from_env();
@@ -212,6 +217,29 @@ fn restore_terminal(
     .map_err(BosunError::Io)?;
     terminal.show_cursor().map_err(BosunError::Io)?;
     Ok(())
+}
+
+/// Exit with install instructions if no `tmux` binary is on PATH.
+fn ensure_tmux_installed() {
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok()
+    {
+        return;
+    }
+    eprintln!(
+        "bosun requires tmux, but no `tmux` binary was found on your PATH.
+
+Install it and run bosun again:
+
+    macOS:          brew install tmux
+    Debian/Ubuntu:  sudo apt install tmux
+    Fedora:         sudo dnf install tmux
+
+See https://github.com/yetidevworks/bosun#requirements for details."
+    );
+    std::process::exit(1);
 }
 
 fn print_help() {

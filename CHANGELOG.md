@@ -4,6 +4,19 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-08-18
+
+### Changed
+- **Friendly error when tmux is missing.** Bosun now checks for a
+  `tmux` binary on PATH before starting the TUI and exits with
+  per-platform install instructions instead of a bare io error after
+  the terminal has already switched to the alternate screen.
+- **tmux is documented as a prerequisite.** The README's Requirements
+  and Installation sections now spell out that bosun drives tmux but
+  does not bundle it, with install commands for macOS and Linux, and
+  the Homebrew formula declares `depends_on "tmux"` so
+  `brew install yetidevworks/bosun/bosun` pulls it in automatically.
+
 ## [2.1.0] — 2026-08-10
 
 ### Added

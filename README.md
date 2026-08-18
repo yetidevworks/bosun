@@ -144,11 +144,20 @@ you can click into and drive without leaving bosun.
 
 ## Requirements
 
-- Rust 1.80 or newer
-- tmux 3.x (tested against 3.6)
+- tmux 3.x (tested against 3.6) — bosun drives tmux but does not
+  bundle it, and errors out at startup if it can't find it
+- Rust 1.80 or newer (only needed when building from source or
+  installing via cargo)
 - macOS or Linux (Windows is not supported)
 
 ## Installation
+
+Bosun needs tmux on your `PATH`. If you don't already have it:
+
+```bash
+brew install tmux        # macOS
+sudo apt install tmux    # Debian/Ubuntu
+```
 
 ### Homebrew (recommended)
 
