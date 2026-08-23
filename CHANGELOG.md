@@ -4,6 +4,20 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.8] — 2026-08-23
+
+### Fixed
+- **Dialogs no longer show the pane's underlines through them.**
+  Opening a dialog over a session containing underlined text drew those
+  underlines through the dialog body — and the same went for bold,
+  italic and reverse video. Modals, the tab strip and the preview now
+  clear a cell before painting over it instead of only setting its
+  colours. The dimmed backdrop still shows the real UI behind the
+  dialog, attributes and all. Thanks to
+  [@attilaolah](https://github.com/attilaolah) for the report ([#12]).
+
+[#12]: https://github.com/yetidevworks/bosun/issues/12
+
 ## [2.1.7] — 2026-08-23
 
 ### Fixed
