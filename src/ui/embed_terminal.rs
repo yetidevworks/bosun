@@ -33,10 +33,11 @@ use std::thread;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::buffer::Buffer;
+use ratatui::layout::Position;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use tokio::sync::mpsc;
-use tui_term::widget::PseudoTerminal;
+use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::events::AppMsg;
 
@@ -428,9 +429,37 @@ impl EmbedTerminal {
     /// Render the current vt100 screen into `area` of `buf`. Uses
     /// `tui_term::widget::PseudoTerminal`, which walks the screen
     /// grid and emits ratatui `Cell`s with SGR attributes translated.
+    ///
+    /// tui-term's own cursor is switched off: by default it paints a
+    /// gray `█` glyph (reverse-video on an occupied cell) into the
+    /// buffer at the inner cursor, while the outer terminal's real
+    /// cursor stays hidden and parks wherever ratatui's last diff
+    /// write ended. Mosh-based clients (Moshi on iOS) track that
+    /// hidden, wandering cursor and, once a tap-to-position has
+    /// primed their own cursor overlay, leave a ghost glyph at every
+    /// spot it lands. The caller positions the *real* cursor instead
+    /// via [`cursor_position`](Self::cursor_position).
     pub fn render(&self, buf: &mut Buffer, area: Rect) {
-        let widget = PseudoTerminal::new(self.parser.screen());
+        let widget =
+            PseudoTerminal::new(self.parser.screen()).cursor(Cursor::default().visibility(false));
         widget.render(area, buf);
+    }
+
+    /// Where the outer terminal's real cursor should sit for the
+    /// screen rendered into `area`, or `None` when the inner app has
+    /// hidden its cursor (DECTCEM off) or the cursor falls outside
+    /// the area (e.g. the PTY and render rect briefly disagree in
+    /// size mid-resize).
+    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        let screen = self.parser.screen();
+        if screen.hide_cursor() {
+            return None;
+        }
+        let (row, col) = screen.cursor_position();
+        if row >= area.height || col >= area.width {
+            return None;
+        }
+        Some(Position::new(area.x + col, area.y + row))
     }
 }
 

@@ -169,6 +169,16 @@ pub fn render(
                     area
                 };
                 embed.render(frame.buffer_mut(), render_area);
+                // Drive the outer terminal's real cursor to the inner
+                // app's cursor cell instead of painting a fake one
+                // (see `EmbedTerminal::render`). Skipped while a modal
+                // is up so a blinking cursor doesn't show through the
+                // dimmed preview behind the dialog.
+                if state.modals.is_empty() {
+                    if let Some(pos) = embed.cursor_position(render_area) {
+                        frame.set_cursor_position(pos);
+                    }
+                }
                 return;
             }
         }
