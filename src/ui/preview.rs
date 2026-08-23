@@ -224,14 +224,12 @@ fn shrink_for_focus_border(area: Rect) -> Rect {
 }
 
 fn reset_area(buf: &mut Buffer, area: Rect) {
+    // Opaque, so leftover attributes (underline, reverse…) from the
+    // previous frame's content don't shine through the fresh one —
+    // `Cell::set_style` alone would leave them in place. See
+    // `crate::ui::paint`.
     let reset_style = Style::default().fg(Color::Reset).bg(Color::Reset);
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            let cell = &mut buf[(x, y)];
-            cell.set_char(' ');
-            cell.set_style(reset_style);
-        }
-    }
+    crate::ui::paint::fill_opaque(buf, area, reset_style);
 }
 
 fn placeholder(msg: &str, theme: &Theme) -> Text<'static> {

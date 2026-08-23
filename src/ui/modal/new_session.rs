@@ -912,31 +912,16 @@ impl Modal for NewSessionModal {
         {
             let shadow = Rect::new(rect.x + 1, rect.y + 1, rect.width, rect.height);
             let style = Style::default().bg(theme.shadow);
-            for y in shadow.top()..shadow.bottom() {
-                for x in shadow.left()..shadow.right() {
-                    let cell = &mut buf[(x, y)];
-                    cell.set_style(style);
-                }
-            }
+            crate::ui::paint::tint(buf, shadow, style);
         }
 
         // Modal body: solid panel fill.
         let body_style = Style::default().bg(body_bg);
-        for y in rect.top()..rect.bottom() {
-            for x in rect.left()..rect.right() {
-                let cell = &mut buf[(x, y)];
-                cell.set_char(' ');
-                cell.set_style(body_style);
-            }
-        }
+        crate::ui::paint::fill_opaque(buf, rect, body_style);
 
         // Left accent bar — 1 col wide, full height.
         let accent_style = Style::default().bg(theme.accent);
-        for y in rect.top()..rect.bottom() {
-            let cell = &mut buf[(rect.left(), y)];
-            cell.set_char(' ');
-            cell.set_style(accent_style);
-        }
+        crate::ui::paint::fill_opaque(buf, crate::ui::paint::left_edge(rect), accent_style);
 
         // Content inset from the accent bar + padding.
         let inner = Rect::new(
@@ -1528,6 +1513,65 @@ mod tests {
         let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
         m.path = "/_bosun_unit_test_nonexistent_/".into();
         m
+    }
+
+    /// Issue #12: the modal is drawn straight over a live terminal
+    /// pane, and `Cell::set_style` only *adds* modifiers — it never
+    /// clears what is already on the cell. Painting the body with a
+    /// plain background style therefore left underlines (and bold,
+    /// and reverse video) from the pane below running through the
+    /// dialog. Render over a deliberately attribute-heavy buffer and
+    /// assert the modal's own surface comes out clean.
+    #[test]
+    fn modal_body_covers_attributes_from_the_pane_below() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+        use ratatui::Terminal;
+
+        let m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        let theme = crate::ui::Theme::default_opencode();
+        let (w, h) = (120u16, 40u16);
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        terminal
+            .draw(|f| {
+                // Stand in for the embedded pane: every cell underlined,
+                // bold and reversed.
+                let busy = Style::default()
+                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD | Modifier::REVERSED);
+                let buf = f.buffer_mut();
+                for y in 0..h {
+                    for x in 0..w {
+                        let cell = &mut buf[(x, y)];
+                        cell.set_char('_');
+                        cell.set_style(busy);
+                    }
+                }
+                m.render(f, area, &theme);
+            })
+            .unwrap();
+
+        let rect = center_rect(area, MODAL_WIDTH, m.modal_height());
+        let buf = terminal.backend().buffer();
+        for y in rect.top()..rect.bottom() {
+            for x in rect.left()..rect.right() {
+                let cell = &buf[(x, y)];
+                assert!(
+                    !cell.modifier.contains(Modifier::UNDERLINED),
+                    "underline from the pane below bled into the modal at ({x},{y})"
+                );
+                assert!(
+                    !cell.modifier.contains(Modifier::REVERSED),
+                    "reverse video from the pane below bled into the modal at ({x},{y})"
+                );
+                assert_ne!(
+                    cell.symbol(),
+                    "_",
+                    "pane text showing through the modal body at ({x},{y})"
+                );
+            }
+        }
     }
 
     /// A directory with two `zebra_*` children, so completion has a

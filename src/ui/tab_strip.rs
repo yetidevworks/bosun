@@ -222,11 +222,11 @@ pub fn render(
     // was under it previously (the embed redraws every frame too,
     // but the strip lives outside the embed rect).
     let bg_style = Style::default().bg(theme.panel).fg(theme.text_muted);
-    for x in area.left()..area.right() {
-        let cell = &mut buf[(x, area.y)];
-        cell.set_char(' ');
-        cell.set_style(bg_style);
-    }
+    crate::ui::paint::fill_opaque(
+        buf,
+        ratatui::layout::Rect::new(area.x, area.y, area.width, 1),
+        bg_style,
+    );
 
     // Draw each tab pill in slot order. The visible window maps
     // `layout.tabs[i]` → `container.members[first_visible + i]`.

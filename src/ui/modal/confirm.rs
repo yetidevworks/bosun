@@ -195,21 +195,11 @@ impl Modal for ConfirmModal {
         {
             let shadow = Rect::new(rect.x + 1, rect.y + 1, rect.width, rect.height);
             let style = Style::default().bg(theme.shadow);
-            for y in shadow.top()..shadow.bottom() {
-                for x in shadow.left()..shadow.right() {
-                    buf[(x, y)].set_style(style);
-                }
-            }
+            crate::ui::paint::tint(buf, shadow, style);
         }
 
         let body_style = Style::default().bg(body_bg);
-        for y in rect.top()..rect.bottom() {
-            for x in rect.left()..rect.right() {
-                let cell = &mut buf[(x, y)];
-                cell.set_char(' ');
-                cell.set_style(body_style);
-            }
-        }
+        crate::ui::paint::fill_opaque(buf, rect, body_style);
 
         let accent_color = if self.destructive {
             theme.status_error
@@ -217,11 +207,7 @@ impl Modal for ConfirmModal {
             theme.accent
         };
         let accent_style = Style::default().bg(accent_color);
-        for y in rect.top()..rect.bottom() {
-            let cell = &mut buf[(rect.left(), y)];
-            cell.set_char(' ');
-            cell.set_style(accent_style);
-        }
+        crate::ui::paint::fill_opaque(buf, crate::ui::paint::left_edge(rect), accent_style);
 
         let inner = Rect::new(
             rect.x + 3,
