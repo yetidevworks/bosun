@@ -34,7 +34,14 @@ const DROPDOWN_MAX_VISIBLE: usize = 8;
 
 // --- Agent dropdown --------------------------------------------------
 
-pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "opencode", "qwen", "terminal"];
+pub use crate::config::AGENTS;
+
+/// Index of `agent` in the selector, falling back to the first entry
+/// for anything unrecognised. Config validation already rejects bad
+/// names, so the fallback only covers direct callers.
+fn agent_index(agent: &str) -> usize {
+    AGENTS.iter().position(|a| *a == agent).unwrap_or(0)
+}
 
 // --- Modal state -----------------------------------------------------
 
@@ -182,6 +189,14 @@ struct PathEntry {
 
 impl NewSessionModal {
     pub fn new(recents: Vec<Recent>, worktree_location: crate::config::WorktreeLocation) -> Self {
+        Self::with_default_agent(recents, worktree_location, crate::config::DEFAULT_AGENT)
+    }
+
+    pub fn with_default_agent(
+        recents: Vec<Recent>,
+        worktree_location: crate::config::WorktreeLocation,
+        default_agent: &str,
+    ) -> Self {
         // Default the path to the most-recently-used session's path so
         // the modal "remembers" where you last worked across restarts.
         // Falls back to cwd (and then to ~) when there are no recents.
@@ -200,7 +215,7 @@ impl NewSessionModal {
             worktree: false,
             branch: String::new(),
             branch_edited: false,
-            agent_idx: 0,
+            agent_idx: agent_index(default_agent),
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
@@ -265,14 +280,19 @@ impl NewSessionModal {
     /// fresh sidebar row. The `name` field starts empty so the user
     /// types a fresh tab label — the container's existing internal
     /// tmux name is not a useful seed.
-    pub fn for_add_tab(container_id: String, container_path: String, recents: Vec<Recent>) -> Self {
+    pub fn for_add_tab(
+        container_id: String,
+        container_path: String,
+        recents: Vec<Recent>,
+        default_agent: &str,
+    ) -> Self {
         let mut modal = Self {
             name: String::new(),
             path: container_path,
             worktree: false,
             branch: String::new(),
             branch_edited: false,
-            agent_idx: 0,
+            agent_idx: agent_index(default_agent),
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),
@@ -1788,6 +1808,47 @@ mod tests {
         // Plain typing still works.
         m.handle(key(KeyCode::Char('x')));
         assert_eq!(m.name, "x");
+    }
+
+    #[test]
+    fn new_session_modal_preselects_the_configured_agent() {
+        let m = NewSessionModal::with_default_agent(
+            Vec::new(),
+            WorktreeLocation::default(),
+            "opencode",
+        );
+        assert_eq!(m.agent(), "opencode");
+    }
+
+    /// The add-tab form is the other way to create a session, so it has
+    /// to honour `default_agent` too — otherwise `n` and Ctrl+T would
+    /// disagree about which agent is preselected.
+    #[test]
+    fn add_tab_modal_preselects_the_configured_agent() {
+        let m = NewSessionModal::for_add_tab(
+            "bosun-container".to_string(),
+            "/tmp".to_string(),
+            Vec::new(),
+            "qwen",
+        );
+        assert_eq!(m.agent(), "qwen");
+    }
+
+    #[test]
+    fn an_unknown_default_agent_falls_back_to_the_first() {
+        let m = NewSessionModal::with_default_agent(
+            Vec::new(),
+            WorktreeLocation::default(),
+            "nonesuch",
+        );
+        assert_eq!(m.agent(), AGENTS[0]);
+        let t = NewSessionModal::for_add_tab(
+            "c".to_string(),
+            "/tmp".to_string(),
+            Vec::new(),
+            "nonesuch",
+        );
+        assert_eq!(t.agent(), AGENTS[0]);
     }
 
     #[test]

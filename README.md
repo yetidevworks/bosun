@@ -499,6 +499,7 @@ embed_enabled    = true         # set false to fall back to the polled-snapshot 
 show_group_in_title = false      # prefix grouped sessions as "group/session" in tab pills and terminal title
 editor           = "zed"        # set via `bosun editor <cmd>`; used by the `e` key
 banner_font      = "newsx"      # section banner font; cycled with `f` on a header
+default_agent    = "opencode"   # agent preselected for new sessions; defaults to "claude"
 
 # Optional per-agent binary overrides. The value replaces the agent's
 # binary in the launch command, so you can point an agent at a wrapper
