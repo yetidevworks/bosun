@@ -4,6 +4,19 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.9] — 2026-08-23
+
+### Fixed
+- **`Ctrl+W` deletes a word in the new-session dialog** instead of
+  typing a `w`. In the path field it walks up one directory, so you can
+  back out of `~/work/deep/project` without holding backspace. The same
+  slip meant any other Ctrl combo the dialog didn't handle typed its
+  bare letter into the field — `Ctrl+A` inserted an `a`, and so on;
+  modified keys are now ignored there. Thanks to
+  [@attilaolah](https://github.com/attilaolah) for the report ([#11]).
+
+[#11]: https://github.com/yetidevworks/bosun/issues/11
+
 ## [2.1.8] — 2026-08-23
 
 ### Fixed
