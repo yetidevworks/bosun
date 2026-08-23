@@ -4,6 +4,29 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.11] — unreleased
+
+### Fixed
+- **An exited session says so.** When a tmux session ends its sidebar
+  row stays put on purpose, so `R` can restart it — but the row
+  collapsed to a bare `?`, the preview sat on "capturing…" forever, and
+  the tab pill fell back to the raw internal name
+  (`bosun-test-fe0689e0`), which read as bosun losing track of the
+  session. The row now reads `? name  exited`, the preview says
+  `session exited · R restart · d remove`, and the tab pill shows the
+  friendly name. Reported by
+  [@attilaolah](https://github.com/attilaolah) ([#14]).
+
+### Added
+- **`remove_dead_sessions`** in `config.toml`. Off by default; set it
+  to `true` and a session's row disappears when its tmux session ends,
+  instead of staying as an `exited` row. Rows that were already gone
+  when bosun started — the tmux server having gone away with the
+  machine — are kept either way, so a reboot can't wipe a grouped
+  sidebar.
+
+[#14]: https://github.com/yetidevworks/bosun/issues/14
+
 ## [2.1.10] — 2026-08-23
 
 ### Fixed
