@@ -1661,11 +1661,20 @@ mod tests {
 
     /// A directory with two `zebra_*` children, so completion has a
     /// longest common prefix to extend to and the dropdown is non-empty.
+    ///
+    /// Each call gets its own directory. It used to key the name off
+    /// `line!()`, which expands where the macro is *written* rather
+    /// than at the call site — so every caller shared one directory,
+    /// and since the tests run in parallel and each removes the
+    /// directory when it finishes, one test could delete the tree
+    /// another was still using.
     fn dir_with_completions() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let base = std::env::temp_dir().join(format!(
             "bosun-complete-test-{}-{}",
             std::process::id(),
-            line!()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(base.join("zebra_one")).expect("mkdir");
         std::fs::create_dir_all(base.join("zebra_two")).expect("mkdir");
