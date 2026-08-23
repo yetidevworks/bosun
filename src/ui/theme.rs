@@ -517,13 +517,16 @@ status_error = "#ff0000"
         assert_eq!(t.accent, Color::Rgb(0xff, 0x00, 0x00));
     }
 
+    /// A directory of this test's own. The counter is what guarantees
+    /// two parallel tests can't land on the same path — a timestamp
+    /// alone leaves that to clock resolution.
     fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let base = std::env::temp_dir().join(format!(
-            "bosun-theme-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "bosun-theme-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&base).unwrap();
         base

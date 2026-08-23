@@ -14,7 +14,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 
 /// Paint `rect` as an opaque surface: every cell becomes a blank
 /// carrying exactly `style`, with any character attributes inherited
@@ -33,17 +33,20 @@ pub fn fill_opaque(buf: &mut Buffer, rect: Rect, style: Style) {
     }
 }
 
-/// Recolor `rect` while leaving the characters in place — used for the
-/// modal drop shadow, which darkens what it falls across rather than
-/// erasing it. Still clears stale attributes, so an underline in the
-/// pane below doesn't survive into the shadow.
+/// Recolor `rect` while leaving what's there intact — used for the
+/// modal drop shadow, which darkens the content it falls across rather
+/// than covering it.
+///
+/// Attributes are deliberately kept. 2.1.8 cleared them here as well as
+/// on the opaque surfaces, which left a strip of un-styled cells under
+/// the shadow: with underlined text behind a dialog you could see the
+/// underlines stop at the shadow and resume past it, which reads as a
+/// glitch rather than a shadow.
 pub fn tint(buf: &mut Buffer, rect: Rect, style: Style) {
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
         for x in rect.left()..rect.right() {
-            let cell = &mut buf[(x, y)];
-            cell.modifier = Modifier::empty();
-            cell.set_style(style);
+            buf[(x, y)].set_style(style);
         }
     }
 }
@@ -57,7 +60,7 @@ pub fn left_edge(rect: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     fn underlined_buffer(w: u16, h: u16) -> Buffer {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
@@ -95,8 +98,11 @@ mod tests {
         assert!(buf[(4, 1)].modifier.contains(Modifier::UNDERLINED));
     }
 
+    /// The shadow darkens content rather than covering it, so both the
+    /// characters and their attributes stay — clearing the attributes
+    /// made underlined text visibly break where the shadow crossed it.
     #[test]
-    fn tint_keeps_characters_but_drops_attributes() {
+    fn tint_recolors_but_keeps_content_and_attributes() {
         let mut buf = underlined_buffer(4, 1);
         tint(
             &mut buf,
@@ -106,7 +112,10 @@ mod tests {
 
         assert_eq!(buf[(0, 0)].symbol(), "x", "tint should not erase content");
         assert_eq!(buf[(0, 0)].bg, Color::Black);
-        assert!(buf[(0, 0)].modifier.is_empty());
+        assert!(
+            buf[(0, 0)].modifier.contains(Modifier::UNDERLINED),
+            "an underline should carry on through the shadow"
+        );
         assert!(buf[(3, 0)].modifier.contains(Modifier::UNDERLINED));
     }
 
@@ -116,7 +125,10 @@ mod tests {
         // Rect extending past both edges must not panic.
         fill_opaque(&mut buf, Rect::new(2, 1, 40, 40), Style::default());
         tint(&mut buf, Rect::new(0, 0, 40, 40), Style::default());
-        assert!(buf[(2, 1)].modifier.is_empty());
+        assert!(
+            buf[(2, 1)].modifier.is_empty(),
+            "the opaque fill still clears"
+        );
     }
 
     #[test]
