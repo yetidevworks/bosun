@@ -268,12 +268,15 @@ impl TmuxClient for TokioTmuxClient {
         //   * Custom -L socket that was never created:
         //     "error connecting to /private/tmp/tmux-501/<name> (No such file or directory)"
         //   * Some versions: "no sessions"
-        // All three mean "empty" for our purposes.
+        //   * Racing the shutdown that killing the *last* session
+        //     triggers: "server exited unexpectedly". The server is on
+        //     its way out precisely because nothing is left to list, so
+        //     that means empty too, not an error worth showing the
+        //     user. (Seen on Linux tmux; macOS usually finishes exiting
+        //     before we ask and answers "no server running".)
+        // All of them mean "empty" for our purposes.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("no server running")
-            || stderr.contains("no sessions")
-            || (stderr.contains("error connecting") && stderr.contains("No such file or directory"))
-        {
+        if is_empty_server_stderr(&stderr) {
             return Ok(Vec::new());
         }
 
@@ -1068,9 +1071,38 @@ where
     c
 }
 
+/// True when tmux's stderr means "there is nothing to list" rather than
+/// a real failure. tmux exits non-zero for an empty or absent server and
+/// phrases it several ways depending on version, platform, and whether
+/// we caught the server mid-shutdown right after its last session was
+/// killed.
+fn is_empty_server_stderr(stderr: &str) -> bool {
+    stderr.contains("no server running")
+        || stderr.contains("no sessions")
+        || stderr.contains("server exited unexpectedly")
+        || (stderr.contains("error connecting") && stderr.contains("No such file or directory"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_server_stderr_covers_every_phrasing() {
+        for e in [
+            "no server running on /tmp/tmux-501/default",
+            "no sessions",
+            // Emitted when list-sessions races the server shutdown that
+            // killing the last session triggers.
+            "server exited unexpectedly",
+            "error connecting to /private/tmp/tmux-501/x (No such file or directory)",
+        ] {
+            assert!(is_empty_server_stderr(e), "should read as empty: {e}");
+        }
+        for e in ["can't find session: foo", "usage: list-sessions"] {
+            assert!(!is_empty_server_stderr(e), "should be a real error: {e}");
+        }
+    }
 
     const SEP: &str = "|||";
 
