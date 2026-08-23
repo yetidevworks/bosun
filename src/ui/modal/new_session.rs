@@ -636,6 +636,29 @@ impl Modal for NewSessionModal {
             return ModalResult::Push(Box::new(RecentsModal::new(self.recents.clone())));
         }
 
+        // Ctrl-W rubs out the word before the cursor, as a shell does.
+        // On the Path field a "word" is a path segment, so it walks up
+        // one directory — the thing it's most useful for here.
+        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.error = None;
+            match self.field {
+                Field::Name => self.name = delete_prev_word(&self.name, WordBreak::Whitespace),
+                Field::Path => {
+                    self.path = delete_prev_word(&self.path, WordBreak::PathSegment);
+                    self.reset_path_dropdown();
+                }
+                Field::Args => self.args = delete_prev_word(&self.args, WordBreak::Whitespace),
+                Field::Branch => {
+                    self.branch = delete_prev_word(&self.branch, WordBreak::Whitespace);
+                    // Emptying the field un-latches the manual edit so
+                    // the name slug takes over again, matching Backspace.
+                    self.branch_edited = !self.branch.is_empty();
+                }
+                _ => {}
+            }
+            return ModalResult::Consumed;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 // If the path dropdown is visible, Escape dismisses it
@@ -876,7 +899,15 @@ impl Modal for NewSessionModal {
                 }
                 ModalResult::Consumed
             }
-            KeyCode::Char(c) => {
+            // Modified keys never insert text: without this, any Ctrl
+            // combo the arms above don't claim (Ctrl-W was the one
+            // reported, but Ctrl-A, Ctrl-E and friends did it too)
+            // typed its bare letter into the field. Matches the guard
+            // the rename and section modals already use.
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
                 self.error = None;
                 match self.field {
                     Field::Name => self.name.push(c),
@@ -1252,6 +1283,40 @@ fn split_path(path: &str) -> (String, String) {
     match path.rfind('/') {
         Some(idx) => (path[..=idx].to_string(), path[idx + 1..].to_string()),
         None => (String::new(), path.to_string()),
+    }
+}
+
+/// What counts as a word boundary for `delete_prev_word`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordBreak {
+    /// Shell-style: words are separated by whitespace.
+    Whitespace,
+    /// Paths: segments are separated by `/`, so rubbing out a word
+    /// lands on the parent directory.
+    PathSegment,
+}
+
+/// Delete the word at the end of `s`, the way a shell's Ctrl-W does:
+/// any trailing separators go first, then everything back to (but not
+/// including) the separator before them. Returns the empty string when
+/// there is no earlier separator to stop at.
+fn delete_prev_word(s: &str, brk: WordBreak) -> String {
+    let is_sep = |c: char| match brk {
+        WordBreak::Whitespace => c.is_whitespace(),
+        WordBreak::PathSegment => c == '/',
+    };
+    // Trailing separators belong to the segment being removed, so
+    // Ctrl-W on `/a/b/` acts on `b`, not on the empty piece after it.
+    let trimmed = s.trim_end_matches(is_sep);
+    match trimmed.rfind(is_sep) {
+        // Keep the separator itself: `/a/b/c` -> `/a/b/` stays a
+        // directory, and `foo bar` -> `foo ` keeps the space a shell
+        // would leave behind.
+        Some(idx) => {
+            let sep_len = trimmed[idx..].chars().next().map_or(1, char::len_utf8);
+            trimmed[..idx + sep_len].to_string()
+        }
+        None => String::new(),
     }
 }
 
@@ -1643,6 +1708,86 @@ mod tests {
         );
         assert_eq!(m.field, Field::Path);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn delete_prev_word_walks_up_a_path() {
+        let up = |p: &str| delete_prev_word(p, WordBreak::PathSegment);
+        assert_eq!(up("/Users/olaa/work/"), "/Users/olaa/");
+        assert_eq!(up("/Users/olaa/work"), "/Users/olaa/");
+        assert_eq!(up("/Users/olaa/"), "/Users/");
+        assert_eq!(up("~/work/deep"), "~/work/");
+        assert_eq!(up("~/"), "");
+        assert_eq!(up("/"), "");
+        assert_eq!(up("relative"), "");
+        assert_eq!(up(""), "");
+        // A space inside a path is part of the segment, not a break.
+        assert_eq!(up("/tmp/my folder/x"), "/tmp/my folder/");
+    }
+
+    #[test]
+    fn delete_prev_word_rubs_out_words_elsewhere() {
+        let w = |t: &str| delete_prev_word(t, WordBreak::Whitespace);
+        assert_eq!(w("hello world"), "hello ");
+        assert_eq!(w("hello world   "), "hello ");
+        assert_eq!(w("solo"), "");
+        assert_eq!(w(""), "");
+    }
+
+    /// Issue #11: Ctrl-W used to type a `w` into the field.
+    #[test]
+    fn ctrl_w_edits_instead_of_typing_a_letter() {
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+
+        m.field = Field::Path;
+        m.path = "/Users/olaa/work/".into();
+        m.handle(ctrl(KeyCode::Char('w')));
+        assert_eq!(m.path, "/Users/olaa/", "Ctrl-W should walk up a directory");
+
+        m.field = Field::Name;
+        m.name = "my session".into();
+        m.handle(ctrl(KeyCode::Char('w')));
+        assert_eq!(m.name, "my ");
+
+        m.field = Field::Args;
+        m.args = "--foo --bar".into();
+        m.handle(ctrl(KeyCode::Char('w')));
+        assert_eq!(m.args, "--foo ");
+    }
+
+    /// Emptying the branch by rubbing out its last word re-engages the
+    /// auto-slug, the same way Backspace to empty does.
+    #[test]
+    fn ctrl_w_emptying_the_branch_restores_the_slug() {
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        m.field = Field::Branch;
+        m.branch = "custom".into();
+        m.branch_edited = true;
+        m.handle(ctrl(KeyCode::Char('w')));
+        assert_eq!(m.branch, "");
+        assert!(
+            !m.branch_edited,
+            "empty branch should un-latch the manual edit"
+        );
+    }
+
+    /// The underlying cause of #11: a modified key fell through to the
+    /// plain character arm and inserted its letter.
+    #[test]
+    fn other_control_combos_do_not_type_their_letter() {
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        m.field = Field::Name;
+        for c in ['a', 'e', 'u', 'k'] {
+            m.handle(ctrl(KeyCode::Char(c)));
+        }
+        assert_eq!(m.name, "", "Ctrl combos must not insert text");
+        // Plain typing still works.
+        m.handle(key(KeyCode::Char('x')));
+        assert_eq!(m.name, "x");
     }
 
     #[test]
