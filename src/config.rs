@@ -79,6 +79,12 @@ pub const DEFAULT_TMUX_SOCKET: &str = "bosun";
 /// Default theme name — must match a built-in in `ui::theme`.
 pub const DEFAULT_THEME: &str = "opencode";
 
+/// Every agent the new-session form can launch, in the order its
+/// selector cycles through them. Canonical list: the UI reads it for
+/// the selector and `default_agent` validates against it, so adding an
+/// agent here is enough for both.
+pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "opencode", "qwen", "terminal"];
+
 /// Agent preselected when creating a session unless overridden in
 /// `config.toml` with `default_agent`.
 pub const DEFAULT_AGENT: &str = "claude";
@@ -88,10 +94,7 @@ fn default_agent(value: Option<String>) -> String {
         return DEFAULT_AGENT.to_string();
     };
     let value = value.trim().to_ascii_lowercase();
-    if matches!(
-        value.as_str(),
-        "claude" | "codex" | "kimi" | "opencode" | "qwen" | "terminal"
-    ) {
+    if AGENTS.contains(&value.as_str()) {
         value
     } else {
         tracing::warn!(
@@ -849,6 +852,21 @@ mod tests {
         assert_eq!(default_agent(Some("opencode".to_string())), "opencode");
         assert_eq!(default_agent(None), DEFAULT_AGENT);
         assert_eq!(default_agent(Some("unknown".to_string())), DEFAULT_AGENT);
+    }
+
+    /// Validation reads `AGENTS`, so a newly added agent is
+    /// automatically a valid `default_agent` — no second list to keep
+    /// in sync.
+    #[test]
+    fn every_agent_is_a_valid_default() {
+        for agent in AGENTS {
+            assert_eq!(default_agent(Some((*agent).to_string())), *agent);
+        }
+    }
+
+    #[test]
+    fn default_agent_tolerates_case_and_whitespace() {
+        assert_eq!(default_agent(Some("  OpenCode \n".to_string())), "opencode");
     }
 
     #[test]

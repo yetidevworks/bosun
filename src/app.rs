@@ -3080,6 +3080,7 @@ impl App {
                                 container_id,
                                 container_path,
                                 recents,
+                                &self.state.default_agent,
                             )));
                     }
                 }
