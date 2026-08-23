@@ -120,7 +120,9 @@ pub struct EmbedTerminal {
     /// embed instance after a focus switch.
     session: String,
     parser: vt100::Parser,
-    master: Box<dyn MasterPty + Send>,
+    /// PTY master. `Option` so `Drop` can hand it to the reaper
+    /// thread and keep the fd open until the client has detached.
+    master: Option<Box<dyn MasterPty + Send>>,
     /// Boxed `dyn Write` over the same PTY master as `master`.
     /// portable_pty exposes input as `take_writer()`; we cache the
     /// handle here so `write` doesn't need a fresh allocation per
@@ -286,7 +288,7 @@ impl EmbedTerminal {
         Ok(Self {
             session: session.to_string(),
             parser,
-            master: pair.master,
+            master: Some(pair.master),
             writer: Some(writer),
             child: Some(child),
             stop,
@@ -401,12 +403,14 @@ impl EmbedTerminal {
         self.rows = rows;
         self.cols = cols;
         self.parser.screen_mut().set_size(rows, cols);
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        if let Some(master) = self.master.as_ref() {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
         // The session's window will track our new size through
         // tmux's normal negotiation (window-size=latest by default
         // + our client participates because we don't set
@@ -453,33 +457,42 @@ impl EmbedTerminal {
 impl Drop for EmbedTerminal {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Killing the child closes the slave end; the master's reader
-        // then hits EOF and the reader thread exits naturally. We
-        // intentionally do NOT join the thread here — if the child
-        // wedges, joining would block the app's shutdown path.
+        // Detach the `tmux attach` client cleanly, but do it entirely
+        // on a detached thread so the app loop never blocks.
         //
-        // SIGKILL directly rather than `Child::kill`: portable_pty's
-        // unix `kill` sends SIGHUP and then sleeps in 50ms steps
-        // polling for exit — up to 200ms — before escalating. A tmux
-        // client doesn't exit on SIGHUP inside that window, so every
-        // embed drop stalled the app loop for ~210ms: the keypress lag
-        // when moving through the sidebar. tmux's server copes with an
-        // abruptly dead client the same way it did with the eventual
-        // SIGKILL. The `wait` moves to a detached thread so the loop
-        // never blocks on it and the client doesn't linger as a zombie.
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        if let Some(pid) = child.process_id() {
-            // SAFETY: plain syscall on a pid we spawned and still own.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
+        // The clean part matters: the tmux client must exit *itself*
+        // (on SIGHUP) with its controlling PTY still open. If we
+        // instead SIGKILL it and close the master out from under it,
+        // the abrupt teardown makes the kernel line discipline flush
+        // `\n\x04` (newline + EOT) down to the session's pane — a
+        // stray Enter plus Ctrl-D that adds a blank line to an agent's
+        // composer and makes a bare shell hit EOF and exit. So we send
+        // SIGHUP (via `Child::kill`, which also escalates to SIGKILL
+        // after a grace period if needed) and only drop the master
+        // *after* the client has gone.
+        //
+        // The speed part matters too: `Child::kill` sleeps in 50ms
+        // steps polling for exit — up to ~200ms — and a tmux client
+        // doesn't exit on SIGHUP instantly. Running that on the app
+        // loop was the ~210ms keypress lag when moving through the
+        // sidebar. Moving the whole detach+wait+master-drop onto the
+        // reaper thread keeps the loop instant and the detach clean.
+        let child = self.child.take();
+        let master = self.master.take();
+        let writer = self.writer.take();
+        let name = self.session.clone();
         let _ = thread::Builder::new()
             .name(format!("bosun-embed-reap-{}", self.session))
             .spawn(move || {
-                let _ = child.wait();
+                if let Some(mut child) = child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                // Drop the master and writer only now that the client
+                // has exited, so its PTY is never closed mid-detach.
+                drop(writer);
+                drop(master);
+                let _ = name;
             });
     }
 }
