@@ -4,6 +4,20 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.4] — 2026-08-23
+
+### Fixed
+- **Switching sessions no longer injects a newline or kills the pane.**
+  2.1.3's faster embed teardown SIGKILLed the preview's `tmux attach`
+  client and closed its PTY abruptly, which made the kernel flush a
+  stray newline + Ctrl-D into the *session's* pane. That added a blank
+  line to an agent's composer every time you viewed the session, and
+  made a bare shell hit EOF and exit — killing the session — when you
+  moved the cursor back to the list. The client is now detached
+  cleanly (SIGHUP, PTY held open until it exits) with the whole wait
+  moved to a background thread, so the pane stays untouched and the
+  sidebar stays as responsive as 2.1.3.
+
 ## [2.1.3] — 2026-08-23
 
 ### Fixed
