@@ -231,6 +231,18 @@ pub struct AppState {
     pub worktree_location: crate::config::WorktreeLocation,
     /// Agent preselected when the new-session modal opens.
     pub default_agent: String,
+    /// Drop a row from the sidebar when its tmux session ends, instead
+    /// of keeping it as an `exited` row. Off by default; see
+    /// `Config::remove_dead_sessions`.
+    pub remove_dead_sessions: bool,
+    /// Internal names this run has seen alive at least once. Auto-
+    /// removal is limited to these: a row that was already dead when
+    /// bosun started (the tmux server went away with the machine, say)
+    /// has a layout worth keeping and nothing to observe ending, so it
+    /// stays until the user removes it. Without this, launching bosun
+    /// after a reboot with the option on would silently wipe every
+    /// grouped row at once.
+    pub seen_alive: std::collections::HashSet<String>,
 }
 
 /// What the user has "seen" for one session — the baseline the unread
@@ -954,6 +966,28 @@ impl AppState {
                     .map(|v| (v.name().to_string(), v.session.container_id.clone()))
                     .collect();
                 let reconcile_changed = self.sidebar.reconcile(&live);
+
+                // Opt-in auto-removal. `reconcile` keeps a row whose
+                // session has gone so `R` can restart it; with
+                // `remove_dead_sessions` the row goes instead. Limited
+                // to sessions seen alive during this run — see
+                // `seen_alive`.
+                let pruned = if self.remove_dead_sessions {
+                    let live_names: std::collections::HashSet<&str> =
+                        self.sessions.iter().map(|v| v.name()).collect();
+                    for name in &live_names {
+                        self.seen_alive.insert((*name).to_string());
+                    }
+                    let seen = &self.seen_alive;
+                    let gone = |m: &str| !live_names.contains(m) && seen.contains(m);
+                    let changed = self.sidebar.prune_members(&gone);
+                    if changed {
+                        self.seen_alive.retain(|n| live_names.contains(n.as_str()));
+                    }
+                    changed
+                } else {
+                    false
+                };
                 // Persist whenever reconcile mutated the model
                 // (added an auto-discovered session, deduped a
                 // duplicate, or dropped an empty container) so the
@@ -964,7 +998,7 @@ impl AppState {
                 // id, leaving the container's sibling tabs
                 // (`@bosun_container_id` already pointing at the
                 // original) stranded as top-level rows.
-                if swap_applied || reconcile_changed {
+                if swap_applied || reconcile_changed || pruned {
                     self.save_sidebar(&mut out);
                 }
 
@@ -2279,6 +2313,7 @@ impl App {
             show_group_in_title: config.show_group_in_title,
             worktree_location: config.worktree_location,
             default_agent: config.default_agent,
+            remove_dead_sessions: config.remove_dead_sessions,
             ..Default::default()
         };
 
@@ -5154,6 +5189,84 @@ mod tests {
             ungrouped_names(&s.sidebar),
             vec!["bosun-def".to_string()],
             "new internal landed in the old slot"
+        );
+    }
+
+    /// With `remove_dead_sessions` off (the default) an ended session
+    /// keeps its row so `R` can restart it — issue #14's behaviour,
+    /// now labelled "exited" in the sidebar.
+    #[test]
+    fn dead_rows_are_kept_by_default() {
+        let mut s = AppState::default();
+        s.sidebar = model(&["bosun-a", "bosun-b"], vec![]);
+        s.apply(AppMsg::SessionsRefreshed {
+            sessions: vec![ses("bosun-a"), ses("bosun-b")],
+            select_after: None,
+        });
+        s.apply(AppMsg::SessionsRefreshed {
+            sessions: vec![ses("bosun-a")],
+            select_after: None,
+        });
+        assert_eq!(
+            ungrouped_names(&s.sidebar),
+            vec!["bosun-a".to_string(), "bosun-b".to_string()],
+            "the ended session keeps its slot"
+        );
+    }
+
+    /// With the option on, a session that ends while bosun is watching
+    /// takes its row with it.
+    #[test]
+    fn remove_dead_sessions_drops_a_session_that_ends() {
+        let mut s = AppState::default();
+        s.remove_dead_sessions = true;
+        s.sidebar = model(&["bosun-a", "bosun-b"], vec![]);
+        // Seen alive...
+        s.apply(AppMsg::SessionsRefreshed {
+            sessions: vec![ses("bosun-a"), ses("bosun-b")],
+            select_after: None,
+        });
+        // ...then gone.
+        s.apply(AppMsg::SessionsRefreshed {
+            sessions: vec![ses("bosun-a")],
+            select_after: None,
+        });
+        assert_eq!(
+            ungrouped_names(&s.sidebar),
+            vec!["bosun-a".to_string()],
+            "the ended session's row is dropped"
+        );
+    }
+
+    /// The safety rule behind `seen_alive`: rows that were already dead
+    /// when bosun started (tmux server gone with the machine) are left
+    /// alone even with the option on. Otherwise the first refresh after
+    /// a reboot would wipe every grouped row at once, with no undo.
+    #[test]
+    fn remove_dead_sessions_leaves_rows_never_seen_alive() {
+        let mut s = AppState::default();
+        s.remove_dead_sessions = true;
+        s.sidebar = model(&["bosun-a"], vec![section("g1", "Work", &["bosun-old"])]);
+        // First refresh of the run: nothing from the previous boot is
+        // running, and "bosun-old" was never observed alive here.
+        s.apply(AppMsg::SessionsRefreshed {
+            sessions: vec![],
+            select_after: None,
+        });
+        assert_eq!(
+            ungrouped_names(&s.sidebar),
+            vec!["bosun-a".to_string()],
+            "a row never seen alive is kept"
+        );
+        let grouped: Vec<String> = s.sidebar.sections[0]
+            .members
+            .iter()
+            .flat_map(|c| c.members.clone())
+            .collect();
+        assert_eq!(
+            grouped,
+            vec!["bosun-old".to_string()],
+            "grouped rows survive a cold start"
         );
     }
 

@@ -500,6 +500,10 @@ show_group_in_title = false      # prefix grouped sessions as "group/session" in
 editor           = "zed"        # set via `bosun editor <cmd>`; used by the `e` key
 banner_font      = "newsx"      # section banner font; cycled with `f` on a header
 default_agent    = "opencode"   # agent preselected for new sessions; defaults to "claude"
+remove_dead_sessions = false    # true drops a session's sidebar row when its tmux session ends,
+                                # instead of keeping it as an "exited" row that R can restart.
+                                # Rows that were already gone when bosun started (tmux server
+                                # went away with the machine) are kept either way.
 
 # Optional per-agent binary overrides. The value replaces the agent's
 # binary in the launch command, so you can point an agent at a wrapper

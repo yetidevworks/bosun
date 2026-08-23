@@ -85,6 +85,12 @@ pub const DEFAULT_THEME: &str = "opencode";
 /// agent here is enough for both.
 pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "opencode", "qwen", "terminal"];
 
+/// Whether a session row is dropped from the sidebar once its tmux
+/// session goes away. Off by default: the row keeps its place so `R`
+/// can restart it, and losing a grouped layout is worse than leaving a
+/// row labelled "exited".
+pub const DEFAULT_REMOVE_DEAD_SESSIONS: bool = false;
+
 /// Agent preselected when creating a session unless overridden in
 /// `config.toml` with `default_agent`.
 pub const DEFAULT_AGENT: &str = "claude";
@@ -207,6 +213,9 @@ pub struct Config {
     /// Agent preselected by the new-session form. Invalid or missing
     /// values fall back to `claude`.
     pub default_agent: String,
+    /// Drop a session's sidebar row when its tmux session ends, rather
+    /// than keeping it as an `exited` row that `R` can restart.
+    pub remove_dead_sessions: bool,
     /// Per-agent binary overrides from the `[agents]` table in
     /// `config.toml`, e.g. `opencode = "~/bin/opencode-wrapper"`.
     /// The value replaces the agent's binary in the launch command
@@ -239,6 +248,7 @@ impl Default for Config {
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
+            remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -317,6 +327,9 @@ struct ConfigFile {
     /// `claude`, `codex`, `kimi`, `opencode`, `qwen`, or `terminal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_agent: Option<String>,
+    /// See `Config::remove_dead_sessions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remove_dead_sessions: Option<bool>,
     /// Per-agent binary overrides. See `Config::agent_binaries`.
     /// Persisted as the `[agents]` table:
     /// ```toml
@@ -442,6 +455,9 @@ impl Config {
 
         let worktree_location = file.worktree_location.unwrap_or_default();
         let default_agent = default_agent(file.default_agent);
+        let remove_dead_sessions = file
+            .remove_dead_sessions
+            .unwrap_or(DEFAULT_REMOVE_DEAD_SESSIONS);
 
         let agent_binaries = file.agents.unwrap_or_default();
 
@@ -462,6 +478,7 @@ impl Config {
             show_group_in_title,
             worktree_location,
             default_agent,
+            remove_dead_sessions,
             agent_binaries,
         }
     }
@@ -795,6 +812,7 @@ mod tests {
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
+            remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -841,6 +859,7 @@ mod tests {
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
+            remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
             agent_binaries: std::collections::HashMap::new(),
         };
         assert!(!c.manages("bosun-mine-abc"));

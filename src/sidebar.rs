@@ -425,6 +425,48 @@ impl SidebarModel {
     /// grouping and ordering work. Dead containers render as
     /// "missing" rows; the user can recreate them from the recents
     /// store or `d` to remove.
+    /// Drop every member for which `should_remove` returns true, then
+    /// drop any container left with no tabs. Returns whether anything
+    /// changed. Used only when `remove_dead_sessions` is enabled —
+    /// `reconcile` deliberately keeps rows whose session has gone so
+    /// `R` can restart them.
+    pub fn prune_members(&mut self, should_remove: &dyn Fn(&str) -> bool) -> bool {
+        let mut changed = false;
+        let mut drop_from = |members: &mut Vec<String>, active: &mut String| {
+            let before = members.len();
+            members.retain(|m| !should_remove(m));
+            if members.len() != before {
+                changed = true;
+            }
+            if !members.iter().any(|m| m == active) {
+                if let Some(first) = members.first() {
+                    *active = first.clone();
+                }
+            }
+        };
+        for c in &mut self.ungrouped {
+            drop_from(&mut c.members, &mut c.active);
+        }
+        for sec in &mut self.sections {
+            for c in &mut sec.members {
+                drop_from(&mut c.members, &mut c.active);
+            }
+        }
+        let before = self.ungrouped.len();
+        self.ungrouped.retain(|c| !c.members.is_empty());
+        if self.ungrouped.len() != before {
+            changed = true;
+        }
+        for sec in &mut self.sections {
+            let before = sec.members.len();
+            sec.members.retain(|c| !c.members.is_empty());
+            if sec.members.len() != before {
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn reconcile(&mut self, live: &[(String, Option<String>)]) -> bool {
         let mut changed = false;
         let mut seen = std::collections::HashSet::new();
@@ -726,6 +768,35 @@ mod tests {
         assert!(matches!(m.locate(2), Some(Location::Header(0))));
         assert!(matches!(m.locate(3), Some(Location::Member(0, 0))));
         assert!(m.locate(4).is_none());
+    }
+
+    #[test]
+    fn prune_members_drops_only_what_it_is_told_to() {
+        let mut m = model(&["a", "gone"], vec![sec("g1", "W", &["b", "dead"])]);
+        let remove = |n: &str| n == "gone" || n == "dead";
+        assert!(m.prune_members(&remove));
+        assert_eq!(ungrouped_names(&m), vec!["a".to_string()]);
+        assert_eq!(section_names(&m.sections[0]), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn prune_members_reports_no_change_when_nothing_matches() {
+        let mut m = model(&["a"], vec![sec("g1", "W", &["b"])]);
+        assert!(!m.prune_members(&|_| false));
+        assert_eq!(ungrouped_names(&m), vec!["a".to_string()]);
+    }
+
+    /// A container empties out when its last tab is pruned; an empty
+    /// container has nothing left to render, so it goes too.
+    #[test]
+    fn prune_members_drops_containers_left_empty() {
+        let mut m = model(&["solo"], vec![sec("g1", "W", &["only"])]);
+        assert!(m.prune_members(&|_| true));
+        assert!(ungrouped_names(&m).is_empty());
+        assert!(
+            m.sections[0].members.is_empty(),
+            "section keeps no empty containers"
+        );
     }
 
     #[test]
