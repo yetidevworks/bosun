@@ -62,6 +62,18 @@ pub fn render(
         if let Some(container) = entry.container() {
             if area.height > 0 && area.width > 0 {
                 let strip_area = Rect::new(area.x, area.y, area.width, 1);
+                // Resolve each tab's display name here: a live tab uses
+                // its session's display name, a dead one falls back to
+                // the same recents-backed lookup the sidebar row uses
+                // (issue #14 — it used to show the raw internal name).
+                let tab_names: Vec<String> = container
+                    .members
+                    .iter()
+                    .map(|m| match state.session_by_name(m) {
+                        Some(v) => v.display().to_string(),
+                        None => state.dead_display_for(m),
+                    })
+                    .collect();
                 let tab_views: Vec<Option<&crate::tmux::session::SessionView>> = container
                     .members
                     .iter()
@@ -89,7 +101,7 @@ pub fn render(
                     frame.buffer_mut(),
                     strip_area,
                     container,
-                    &tab_views,
+                    &tab_names,
                     &tab_statuses,
                     theme,
                     group,
@@ -182,6 +194,31 @@ pub fn render(
                 return;
             }
         }
+    }
+
+    // The cursor is on a row whose tmux session is gone. Say so, and
+    // name the two ways out — the row sticking around is deliberate
+    // (it's what `R` restarts from), but leaving the pane blank or
+    // stuck on "capturing…" made it look like bosun had lost track of
+    // something. See issue #14.
+    let selected_is_dead = state
+        .selected_session_name()
+        .is_some_and(|name| state.session_by_name(&name).is_none());
+    if selected_is_dead {
+        let text = Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  session exited",
+                Style::default().fg(theme.text_muted),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  R restart · d remove from sidebar",
+                Style::default().fg(theme.dim_fg),
+            )),
+        ]);
+        Paragraph::new(text).render(working_area, frame.buffer_mut());
+        return;
     }
 
     let text: Text<'_> = if state.sessions.is_empty() {

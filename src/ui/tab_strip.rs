@@ -4,7 +4,7 @@
 //! always reachable without having to first create a second tab.
 //!
 //! The layout is computed by [`compute`] (a pure function over the
-//! preview rect, the container, and per-tab `SessionView`s); the
+//! preview rect, the container, and the resolved per-tab names); the
 //! result is used by both [`render`] and the mouse-click path in
 //! `app.rs` so the click hit-test always matches what was drawn.
 
@@ -14,7 +14,6 @@ use ratatui::style::Style;
 
 use crate::sidebar::Container;
 use crate::tmux::detector::Status;
-use crate::tmux::session::SessionView;
 use crate::ui::Theme;
 
 /// Padding spaces around each tab's `<glyph> <label>` core.
@@ -180,7 +179,11 @@ pub fn render(
     buf: &mut Buffer,
     area: Rect,
     container: &Container,
-    tab_views: &[Option<&SessionView>],
+    // Display name per tab, in `container.members` order. The caller
+    // resolves these because a dead tab's friendly name comes from the
+    // recents store, which lives on `AppState` — showing the raw
+    // internal name instead was issue #14.
+    tab_names: &[String],
     tab_statuses: &[Status],
     theme: &Theme,
     group: Option<&str>,
@@ -194,20 +197,15 @@ pub fn render(
         .iter()
         .enumerate()
         .map(|(i, internal)| {
-            let view = tab_views.get(i).and_then(|v| *v);
-            let base = match view {
-                Some(v) => v.display().to_string(),
-                None => internal.clone(),
-            };
+            let base = tab_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| internal.clone());
             let label = match group {
                 Some(g) => format!("{g}/{base}"),
                 None => base,
             };
-            let status = tab_statuses
-                .get(i)
-                .copied()
-                .or_else(|| view.map(|v| v.status))
-                .unwrap_or(Status::Unknown);
+            let status = tab_statuses.get(i).copied().unwrap_or(Status::Unknown);
             (label, status)
         })
         .collect();
@@ -330,10 +328,8 @@ mod tests {
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let con = Container::single("bosun-alpha-bbbb".into(), "alpha".into());
-        // No live SessionView -> label falls back to the internal name,
-        // which is fine for asserting the prefix is applied.
-        let views: Vec<Option<&SessionView>> = vec![None];
-        render(&mut buf, area, &con, &views, &[], &theme, Some("proj"));
+        let names = vec!["alpha".to_string()];
+        render(&mut buf, area, &con, &names, &[], &theme, Some("proj"));
         let row: String = (0..40)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
@@ -347,12 +343,37 @@ mod tests {
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let con = Container::single("bosun-alpha-bbbb".into(), "alpha".into());
-        let views: Vec<Option<&SessionView>> = vec![None];
-        render(&mut buf, area, &con, &views, &[], &theme, None);
+        let names = vec!["alpha".to_string()];
+        render(&mut buf, area, &con, &names, &[], &theme, None);
         let row: String = (0..40)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(!row.contains('/'), "expected no group prefix, got: {row:?}");
+    }
+
+    /// Issue #14: a tab whose session has exited must still read as its
+    /// friendly name. The caller resolves the name, so the strip's job
+    /// is simply to use what it is handed rather than the internal one.
+    #[test]
+    fn render_uses_the_resolved_name_not_the_internal_one() {
+        use crate::ui::Theme;
+        let theme = Theme::default_opencode();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let con = Container::single("bosun-test-fe0689e0".into(), "test".into());
+        let names = vec!["test".to_string()];
+        render(&mut buf, area, &con, &names, &[], &theme, None);
+        let row: String = (0..40)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row.contains("test"),
+            "expected the friendly name, got: {row:?}"
+        );
+        assert!(
+            !row.contains("bosun-test-"),
+            "internal name leaked into the tab strip: {row:?}"
+        );
     }
 
     #[test]

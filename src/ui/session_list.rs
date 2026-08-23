@@ -568,12 +568,20 @@ fn render_missing_line(
     // Label is the resolved display name (from Recents lookup) or
     // a slug fallback — see `AppState::dead_display_for`. `R` on this
     // row recreates the session from its persisted spec.
+    //
+    // Say "exited" rather than leaving the `?` glyph to carry the
+    // meaning on its own: the row keeping its place after the tmux
+    // session goes away is deliberate (it's what makes `R` able to
+    // bring it back), but a lone `?` reads as a glitch rather than a
+    // state. See issue #14.
     let body = format!("  ? {}", label);
-    let used = extra.chars().count() + body.chars().count();
+    let tag = "  exited";
+    let used = extra.chars().count() + body.chars().count() + tag.chars().count();
     let pad = (width as usize).saturating_sub(used);
     Line::from(vec![
         Span::styled(extra, Style::default().bg(bg)),
         Span::styled(body, Style::default().fg(theme.text_muted).bg(bg)),
+        Span::styled(tag, Style::default().fg(theme.dim_fg).bg(bg)),
         Span::styled(" ".repeat(pad), Style::default().bg(bg)),
     ])
 }
