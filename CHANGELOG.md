@@ -4,6 +4,31 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.7] — 2026-08-23
+
+### Fixed
+- **`~` in a session path works.** Creating a session with a path like
+  `~/work` put it in your home directory without the subpath. tmux
+  doesn't expand tildes, and when the directory doesn't exist it
+  silently starts the session in `$HOME` rather than failing, so the
+  mistake was invisible until you looked at where the session had
+  landed. Bosun now expands the tilde before the path reaches tmux or
+  git — for the new-session modal, for recents saved in the old form,
+  and for restarts rebuilt from session metadata. Thanks to
+  [@attilaolah](https://github.com/attilaolah) for the report ([#10]).
+
+### Changed
+- **Tab always moves between fields in the new-session dialog.** On the
+  Path field it used to attempt completion first and only advance when
+  there was nothing left to complete — which meant it usually didn't
+  advance at all, and you had to press Esc to move on. Completion now
+  lives on the Right arrow, matching how a shell accepts an
+  autosuggestion: Right takes the highlighted dropdown entry, or
+  extends to the longest common prefix. Down, Enter and Esc on the
+  dropdown are unchanged.
+
+[#10]: https://github.com/yetidevworks/bosun/issues/10
+
 ## [2.1.6] — 2026-08-23
 
 ### Fixed
