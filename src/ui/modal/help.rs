@@ -387,6 +387,7 @@ fn build_rows() -> Vec<Row> {
         Binding("f", "Cycle banner font (header: section override)"),
         Blank,
         Section("Settings"),
+        Binding("s / ,", "Settings panel (←→ changes, saved as you go)"),
         Binding("t", "Theme picker (↑↓ live preview, Enter applies)"),
         Binding("? / h", "Show this help"),
         Binding("q / Ctrl+C", "Quit"),

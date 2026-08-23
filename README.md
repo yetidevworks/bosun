@@ -271,6 +271,7 @@ place. A dirty (uncommitted) worktree is never removed.
 | Key | Action |
 |-----|--------|
 | `s` | Toggle single-window mode (preview pane becomes the workspace) |
+| `s` or `,` | Settings panel — the `config.toml` options, editable in place |
 | `t` | Theme picker (`↑`/`↓` live-preview, Enter applies + persists) |
 | `?` / `h` | Show the help cheat sheet |
 | `q` / `Ctrl+C` | Quit |
@@ -327,6 +328,19 @@ that branch instead of the plain path.
 | Type | Filter |
 | `Enter` | Attach to the highlighted match |
 | `Esc` | Cancel |
+
+### Settings panel
+
+`s` (or `,`) opens a panel over the options that live in `config.toml`:
+theme, banner font, default agent, worktree location, single-window
+mode, group-in-tab-title, remove-exited-sessions and the live preview.
+`↑`/`↓` pick a row, `←`/`→` (or space) change it, `esc` closes. There is
+no save step — each change applies immediately and is written to
+`config.toml`, so the panel and the file always agree.
+
+Install-level settings (`session_prefix`, `tmux_socket`, the `[agents]`
+binary overrides) stay file-only: they are set once, and a wrong value
+is better caught by editing the file than by cycling a row.
 
 ### Theme picker
 

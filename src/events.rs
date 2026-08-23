@@ -140,6 +140,20 @@ pub struct QwenOptions {
     pub yolo: bool,
 }
 
+/// An option the settings panel can change. Each variant carries the
+/// new value; the run loop applies it to live state and persists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingChange {
+    Theme(String),
+    BannerFont(String),
+    DefaultAgent(String),
+    WorktreeLocation(crate::config::WorktreeLocation),
+    SingleWindow(bool),
+    ShowGroupInTitle(bool),
+    RemoveDeadSessions(bool),
+    EmbedEnabled(bool),
+}
+
 /// Commands flow from the UI/app task into the tmux actor.
 #[derive(Debug)]
 pub enum Command {
@@ -259,6 +273,10 @@ pub enum Command {
     /// the picker emits `SetTheme { original, persist: false }` to
     /// revert the UI without touching disk.
     SetTheme { name: String, persist: bool },
+    /// A settings-panel edit: apply it live and write it to
+    /// `config.toml`. One variant per editable option — see
+    /// `SettingChange`.
+    ApplySetting(SettingChange),
     /// Spawn the configured external editor (`bosun editor <cmd>` /
     /// `editor = "..."` in config.toml) against the highlighted
     /// session's path. Intercepted by the app loop — runs

@@ -661,6 +661,7 @@ pub fn spawn(
                     tracing::warn!("tmux_actor received Attach — ignored; app task handles attach");
                 }
                 Command::SetTheme { .. }
+                | Command::ApplySetting(_)
                 | Command::SaveDivider(_)
                 | Command::SaveSidebar(_)
                 | Command::SaveSessionHistory(_)

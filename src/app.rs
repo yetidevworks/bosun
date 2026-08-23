@@ -418,6 +418,10 @@ impl AppState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalRequest {
     NewSession,
+    /// Open the settings panel. Like `Theme`, the app loop gathers the
+    /// values (including the on-disk theme list) before constructing
+    /// the modal, so the reducer stays off the filesystem.
+    Settings,
     /// Open the theme picker. The app loop fills in the list of
     /// currently-available themes (built-ins + user dir) before
     /// constructing `ThemeModal`, so `AppState::apply` doesn't need
@@ -1660,9 +1664,14 @@ impl AppState {
             (KeyCode::Char('t'), KeyModifiers::NONE) if self.modals.top_id() != Some("theme") => {
                 self.pending_modal = Some(ModalRequest::Theme);
             }
-            // (The `s` toggle was removed in v2.0.2 — single-window
-            // focused mode is now the only behavior. `Enter` always
-            // opens the session in the embed.)
+            // `s` (or `,`, the usual "preferences" key) opens the
+            // settings panel. `s` was the single-window toggle until
+            // v2.0.2 and has been free since.
+            (KeyCode::Char('s') | KeyCode::Char(','), KeyModifiers::NONE)
+                if self.modals.top_id() != Some("settings") =>
+            {
+                self.pending_modal = Some(ModalRequest::Settings);
+            }
             // `/` opens the type-ahead session picker. Mirrors fzf/
             // vim's convention for "start a filter". The app loop
             // populates it with the current managed sessions.
@@ -2970,6 +2979,9 @@ impl App {
                             }
                         }
                     }
+                    Command::ApplySetting(change) => {
+                        self.apply_setting(change);
+                    }
                     Command::SaveDivider(x) => {
                         if let Err(e) = crate::config::write_divider_x(x) {
                             self.state.warning = Some(format!("divider: failed to save: {e}"));
@@ -3052,6 +3064,26 @@ impl App {
                                 self.state.worktree_location,
                                 &self.state.default_agent,
                             )));
+                    }
+                    ModalRequest::Settings => {
+                        let themes = Theme::available(crate::config::user_themes_dir().as_deref());
+                        let values = crate::ui::modal::settings::SettingsValues {
+                            theme: self.theme.name.clone(),
+                            themes,
+                            banner_font: self.state.banner_font.clone(),
+                            banner_fonts: crate::ui::banner::names()
+                                .map(|n| n.to_string())
+                                .collect(),
+                            default_agent: self.state.default_agent.clone(),
+                            worktree_location: self.state.worktree_location,
+                            single_window: self.state.single_window_mode,
+                            show_group_in_title: self.state.show_group_in_title,
+                            remove_dead_sessions: self.state.remove_dead_sessions,
+                            embed_enabled: self.embed_enabled,
+                        };
+                        self.state.modals.push(Box::new(
+                            crate::ui::modal::settings::SettingsModal::new(values),
+                        ));
                     }
                     ModalRequest::Theme => {
                         let names = Theme::available(crate::config::user_themes_dir().as_deref());
@@ -3815,6 +3847,55 @@ impl App {
         self.embed = Some(embed);
         self.last_embed_spawn = Some(std::time::Instant::now());
         Ok(())
+    }
+
+    /// Apply a settings-panel change to live state and write it to
+    /// `config.toml`. Each option takes effect immediately — the panel
+    /// has no save step — so a failed write is reported as a warning
+    /// while the in-memory change stands.
+    fn apply_setting(&mut self, change: crate::events::SettingChange) {
+        use crate::events::SettingChange as S;
+        let result = match change {
+            S::Theme(name) => {
+                self.theme =
+                    crate::ui::Theme::load(&name, crate::config::user_themes_dir().as_deref());
+                crate::config::write_theme(&name)
+            }
+            S::BannerFont(name) => {
+                self.state.banner_font = name.clone();
+                crate::config::write_banner_font(&name)
+            }
+            S::DefaultAgent(agent) => {
+                self.state.default_agent = agent.clone();
+                crate::config::write_default_agent(&agent)
+            }
+            S::WorktreeLocation(loc) => {
+                self.state.worktree_location = loc;
+                crate::config::write_worktree_location(loc)
+            }
+            S::SingleWindow(on) => {
+                self.state.single_window_mode = on;
+                crate::config::write_single_window(on)
+            }
+            S::ShowGroupInTitle(on) => {
+                self.state.show_group_in_title = on;
+                crate::config::write_show_group_in_title(on)
+            }
+            S::RemoveDeadSessions(on) => {
+                self.state.remove_dead_sessions = on;
+                crate::config::write_remove_dead_sessions(on)
+            }
+            S::EmbedEnabled(on) => {
+                // `sync_embed` reads this every iteration, so turning it
+                // off drops the live embed on the next pass and turning
+                // it back on respawns one for the selection.
+                self.embed_enabled = on;
+                crate::config::write_embed_enabled(on)
+            }
+        };
+        if let Err(e) = result {
+            self.state.warning = Some(format!("settings: failed to save: {e}"));
+        }
     }
 
     /// Compute the current preview area dimensions in (rows, cols)

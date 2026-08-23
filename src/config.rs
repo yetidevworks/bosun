@@ -571,6 +571,60 @@ fn read_config_file() -> Option<ConfigFile> {
 /// dir can't be resolved or writing fails — callers (the theme
 /// picker) surface this as a warning in the status bar but still
 /// apply the change to the live UI.
+/// Read `config.toml`, hand the parsed form to `edit`, and write it
+/// back atomically (temp file + rename, so a kill mid-write can't
+/// leave a truncated config). Fields we don't touch survive because
+/// the whole file round-trips through `ConfigFile`.
+///
+/// The older `write_*` functions each spell this out inline; new ones
+/// go through here.
+fn update_config_file(edit: impl FnOnce(&mut ConfigFile)) -> std::io::Result<()> {
+    let dir =
+        config_dir().ok_or_else(|| std::io::Error::other("cannot resolve bosun config dir"))?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("config.toml");
+
+    let mut file = match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str::<ConfigFile>(&s).unwrap_or_default(),
+        Err(_) => ConfigFile::default(),
+    };
+    edit(&mut file);
+
+    let body = toml::to_string(&file)
+        .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))?;
+
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Persist the agent preselected by the new-session form.
+pub fn write_default_agent(agent: &str) -> std::io::Result<()> {
+    update_config_file(|f| f.default_agent = Some(agent.to_string()))
+}
+
+/// Persist whether an ended session keeps its sidebar row.
+pub fn write_remove_dead_sessions(on: bool) -> std::io::Result<()> {
+    update_config_file(|f| f.remove_dead_sessions = Some(on))
+}
+
+/// Persist whether grouped sessions show `group/session` in tab pills
+/// and the terminal title.
+pub fn write_show_group_in_title(on: bool) -> std::io::Result<()> {
+    update_config_file(|f| f.show_group_in_title = Some(on))
+}
+
+/// Persist where `git worktree add` places new worktrees.
+pub fn write_worktree_location(loc: WorktreeLocation) -> std::io::Result<()> {
+    update_config_file(|f| f.worktree_location = Some(loc))
+}
+
+/// Persist whether the preview embeds a live terminal.
+pub fn write_embed_enabled(on: bool) -> std::io::Result<()> {
+    update_config_file(|f| f.embed = Some(on))
+}
+
 pub fn write_theme(name: &str) -> std::io::Result<()> {
     let dir =
         config_dir().ok_or_else(|| std::io::Error::other("cannot resolve bosun config dir"))?;
