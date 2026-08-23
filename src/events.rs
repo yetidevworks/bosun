@@ -300,6 +300,11 @@ pub enum AppMsg {
     Paste(String),
     /// Terminal was resized.
     Resize(u16, u16),
+    /// Synthetic wake-up from the run loop's selection-settle timer:
+    /// the cursor has rested on a session long enough that a
+    /// deferred embed spawn should go ahead. Carries no data and
+    /// changes no state — `App::sync_embed` does the work.
+    EmbedSettle,
     /// Fresh session list from tmux, with smoothed status and optional
     /// preview buffer per entry. `select_after` carries an internal
     /// session name that the app should jump the selection to — set

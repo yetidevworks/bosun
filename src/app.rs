@@ -295,6 +295,21 @@ const REFLOW_SETTLE_TICKS: u8 = 2;
 /// session stuck as a bare shell with no agent.
 const PENDING_LAUNCH_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long the selection has to rest before a deferred embed spawn
+/// goes ahead. Shorter than a key-repeat interval would defeat the
+/// debounce; longer starts to read as lag after the user stops.
+const EMBED_SETTLE: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// A parked embed spawn — see `App::embed_switch`.
+struct EmbedSwitch {
+    /// Internal session name the embed should attach to once the
+    /// selection settles.
+    target: String,
+    /// When the spawn may go ahead if the selection hasn't moved
+    /// again.
+    due: std::time::Instant,
+}
+
 /// A deferred agent launch (issue #2) waiting for its embed to attach.
 /// `resume` is the one-shot launch-mode override threaded to
 /// `Command::LaunchAgent` (`None` = persisted mode for a fresh create,
@@ -1145,6 +1160,10 @@ impl AppState {
                 // so the wheel can't shift the list underneath a
                 // confirm dialog.
                 self.handle_mouse(m, &mut out);
+            }
+            AppMsg::EmbedSettle => {
+                // Timer wake-up only; `App::sync_embed` reads the
+                // pending switch after `apply` returns.
             }
             AppMsg::Resize(w, h) => {
                 // Keep a cached terminal size for mouse handling —
@@ -2137,6 +2156,23 @@ pub struct App {
     /// Sticky copy of `Config::embed_enabled`. `App::sync_embed`
     /// reads this on every iteration to decide whether to spawn.
     embed_enabled: bool,
+    /// Deferred embed spawn while the user is moving through the
+    /// sidebar quickly. `sync_embed` spawns immediately on an
+    /// isolated selection change, but once changes arrive faster
+    /// than `EMBED_SETTLE` it parks the target here and the run
+    /// loop wakes itself (`AppMsg::EmbedSettle`) when the cursor
+    /// has rested. Holding Down through a dozen sessions then costs
+    /// a dozen cheap `capture-pane` snapshots and one attach,
+    /// instead of a dozen kill + attach round-trips.
+    embed_switch: Option<EmbedSwitch>,
+    /// When the last embed was spawned. Drives the "is the user
+    /// still moving?" check in `sync_embed`.
+    last_embed_spawn: Option<std::time::Instant>,
+    /// Sessions whose `window-size` option has been reset to
+    /// `latest` this run. The reset exists to repair sessions a
+    /// pre-2.0 bosun pinned to `manual`; it's idempotent, so one
+    /// exec per session per run is plenty — not one per spawn.
+    window_size_reset: std::collections::HashSet<String>,
     /// Step 4 focus mode (2.0+). When true, the embed is running
     /// in `AttachMode::Focused` (real attach, ignore-size) and the
     /// app loop routes all `AppMsg::Key` events straight into the
@@ -2255,6 +2291,9 @@ impl App {
             embed: None,
             embed_enabled: config.embed_enabled,
             embed_focused: false,
+            embed_switch: None,
+            last_embed_spawn: None,
+            window_size_reset: std::collections::HashSet::new(),
             restore_focus_after_modal: false,
             kbd_enhanced: false,
             term_colors: crate::terminal_query::TermColors::default(),
@@ -2295,9 +2334,20 @@ impl App {
             .map_err(term_err)?;
 
         while !self.state.quit {
-            let msg = match self.evt_rx.recv().await {
-                Some(m) => m,
-                None => break,
+            // While an embed spawn is parked on the settle timer, wake
+            // up at its deadline even if no event arrives — otherwise
+            // a session the user stopped on would never get its
+            // embed until the next tick or keypress.
+            let msg = match self.embed_switch.as_ref().map(|p| p.due) {
+                Some(due) => match tokio::time::timeout_at(due.into(), self.evt_rx.recv()).await {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break,
+                    Err(_) => AppMsg::EmbedSettle,
+                },
+                None => match self.evt_rx.recv().await {
+                    Some(m) => m,
+                    None => break,
+                },
             };
 
             // Terminal lost focus — just record it. The next genuine
@@ -3396,7 +3446,10 @@ impl App {
             .map(|e| e.session() == internal && e.attach_confirmed())
             .unwrap_or(false);
         let timed_out = std::time::Instant::now() >= pending.deadline;
-        if attached || timed_out || !self.embed_enabled {
+        // No preview area (narrow layout, unfocused) means no embed
+        // will ever attach — same situation as embeds being off.
+        let no_embed_possible = !self.embed_enabled || self.preview_rect().is_none();
+        if attached || timed_out || no_embed_possible {
             self.state.pending_agent_launch.remove(&internal);
             let _ = self.cmd_tx.send(Command::LaunchAgent {
                 internal,
@@ -3410,6 +3463,7 @@ impl App {
             if self.embed.is_some() {
                 self.embed = None;
             }
+            self.embed_switch = None;
             return;
         }
 
@@ -3417,74 +3471,143 @@ impl App {
         // on a row that maps to a live SessionView — dead rows,
         // section headers, and the empty state all yield None,
         // which is the right "no embed" answer.
-        let target = self.state.selected_session().map(|v| v.name().to_string());
+        //
+        // Likewise when there's no preview area to render into
+        // (narrow terminal, unfocused): an embed there has nothing
+        // to show, and because the attach takes part in tmux's size
+        // negotiation it would drag the real session down to the
+        // 20x4 minimum grid — every session the cursor passed over
+        // on a phone was left at 20x3, and moving onto one forced a
+        // full reflow back up to size. Focus (`enter_focus`) spawns
+        // the embed on demand in that layout.
+        let target = if self.preview_rect().is_some() {
+            self.state.selected_session().map(|v| v.name().to_string())
+        } else {
+            None
+        };
         let current = self.embed.as_ref().map(|e| e.session().to_string());
 
-        if target != current {
-            self.embed = None;
-            if let Some(t) = target {
-                let (rows, cols) = self.preview_dims();
-                // Synchronously snapshot the session's current pane
-                // before spawning the embed, then prime the parser
-                // with those bytes. Without this, the parser would
-                // start blank and tmux's `attach -r` would stream
-                // its initial repaint of the existing pane content
-                // — the user sees that repaint render top-to-bottom
-                // over a couple of seconds (visible "scrollback
-                // replay" animation). Priming makes the very first
-                // post-switch frame show the current state. Any
-                // intermediate redraws caused by tmux's repaint
-                // bytes resolve to the same final screen, so the
-                // animation is invisible.
-                let snapshot = match self.client.capture_pane(&t).await {
-                    Ok(bytes) => Some(bytes),
-                    Err(e) => {
-                        tracing::debug!("embed prime capture-pane({t}): {e}");
-                        None
-                    }
-                };
-                // sync_embed always spawns in Preview mode. Focus
-                // entry/exit (Step 4) is handled separately by
-                // `App::set_embed_focus`, which respawns with
-                // `AttachMode::Focused` while preserving the
-                // currently-focused session.
-                // Spawn in the mode that matches the user's intent:
-                // Focused when the embed currently has keyboard
-                // focus (e.g. the user was attached and the active
-                // tab just changed under them via add-tab landing
-                // or `]` / `[` from sidebar mode); Preview otherwise.
-                let mode = if self.embed_focused {
-                    crate::ui::embed_terminal::AttachMode::Focused
-                } else {
-                    crate::ui::embed_terminal::AttachMode::Preview
-                };
-                match crate::ui::embed_terminal::EmbedTerminal::spawn(
-                    self.socket.as_deref(),
-                    &t,
-                    rows,
-                    cols,
-                    mode,
-                    snapshot.as_deref(),
-                    self.embed_default_colors(),
-                    self.evt_tx.clone(),
-                ) {
-                    Ok(e) => self.embed = Some(e),
-                    Err(err) => {
-                        tracing::warn!("embed spawn failed for {}: {}", t, err);
-                        self.state.warning = Some(format!("embed: {err}"));
-                    }
-                }
+        if target == current {
+            self.embed_switch = None;
+            // Same embed; ensure it's sized to the current preview
+            // area. resize() short-circuits if dims are unchanged so
+            // this is free on the steady-state path. Compute dims
+            // first so we don't borrow self both mutably and
+            // immutably.
+            let (rows, cols) = self.preview_dims();
+            if let Some(embed) = self.embed.as_mut() {
+                embed.resize(rows, cols);
             }
             return;
         }
 
-        // Same embed; ensure it's sized to the current preview area.
-        // resize() short-circuits if dims are unchanged so this is
-        // free on the steady-state path. Compute dims first so we
-        // don't borrow self both mutably and immutably.
+        // The selection moved off the embedded session: drop it now
+        // rather than keep relaying a session the cursor isn't on.
+        self.embed = None;
+        let Some(t) = target else {
+            self.embed_switch = None;
+            return;
+        };
+
+        // Settle debounce. An isolated selection change spawns
+        // straight away so a single keypress feels instant. Once
+        // changes arrive faster than `EMBED_SETTLE` (key repeat,
+        // mouse-wheel scrubbing) the spawn is parked: the preview
+        // falls back to a synchronous `capture-pane` snapshot of the
+        // newly-selected session (a few ms, and exactly what the
+        // spawn would prime its parser with anyway), and the run
+        // loop wakes us at `due` to attach for real if the cursor is
+        // still there. A pending switch whose target changes again
+        // just re-primes and pushes `due` out.
+        let now = std::time::Instant::now();
+        match self.embed_switch.as_ref() {
+            Some(p) if p.target == t => {
+                if now < p.due {
+                    return;
+                }
+                // Rested long enough — fall through and spawn.
+            }
+            _ => {
+                let moving = self
+                    .last_embed_spawn
+                    .is_some_and(|at| now.duration_since(at) < EMBED_SETTLE);
+                if moving || self.embed_switch.is_some() {
+                    if let Ok(bytes) = self.client.capture_pane(&t).await {
+                        let arc: std::sync::Arc<[u8]> =
+                            std::sync::Arc::from(bytes.into_boxed_slice());
+                        self.state.apply(AppMsg::PreviewRefreshed {
+                            name: t.clone(),
+                            bytes: arc,
+                        });
+                    }
+                    self.embed_switch = Some(EmbedSwitch {
+                        target: t,
+                        due: now + EMBED_SETTLE,
+                    });
+                    return;
+                }
+            }
+        }
+        self.embed_switch = None;
+
         let (rows, cols) = self.preview_dims();
-        if let Some(embed) = self.embed.as_mut() {
-            embed.resize(rows, cols);
+        // Synchronously snapshot the session's current pane
+        // before spawning the embed, then prime the parser
+        // with those bytes. Without this, the parser would
+        // start blank and tmux's `attach -r` would stream
+        // its initial repaint of the existing pane content
+        // — the user sees that repaint render top-to-bottom
+        // over a couple of seconds (visible "scrollback
+        // replay" animation). Priming makes the very first
+        // post-switch frame show the current state. Any
+        // intermediate redraws caused by tmux's repaint
+        // bytes resolve to the same final screen, so the
+        // animation is invisible.
+        let snapshot = match self.client.capture_pane(&t).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::debug!("embed prime capture-pane({t}): {e}");
+                None
+            }
+        };
+        // Spawn in the mode that matches the user's intent:
+        // Focused when the embed currently has keyboard
+        // focus (e.g. the user was attached and the active
+        // tab just changed under them via add-tab landing
+        // or `]` / `[` from sidebar mode); Preview otherwise.
+        let mode = if self.embed_focused {
+            crate::ui::embed_terminal::AttachMode::Focused
+        } else {
+            crate::ui::embed_terminal::AttachMode::Preview
+        };
+        self.ensure_window_size_latest(&t);
+        match crate::ui::embed_terminal::EmbedTerminal::spawn(
+            self.socket.as_deref(),
+            &t,
+            rows,
+            cols,
+            mode,
+            snapshot.as_deref(),
+            self.embed_default_colors(),
+            self.evt_tx.clone(),
+        ) {
+            Ok(e) => {
+                self.embed = Some(e);
+                self.last_embed_spawn = Some(now);
+            }
+            Err(err) => {
+                tracing::warn!("embed spawn failed for {}: {}", t, err);
+                self.state.warning = Some(format!("embed: {err}"));
+            }
+        }
+    }
+
+    /// One-time-per-run `tmux set-option window-size latest` for a
+    /// session, run before its first embed spawn. See
+    /// `window_size_reset`.
+    fn ensure_window_size_latest(&mut self, session: &str) {
+        if self.window_size_reset.insert(session.to_string()) {
+            crate::ui::embed_terminal::reset_window_size(self.socket.as_deref(), session);
         }
     }
 
@@ -3501,11 +3624,15 @@ impl App {
         let Some(session) = self.state.selected_session().map(|v| v.name().to_string()) else {
             return;
         };
-        if self.embed.is_none() {
-            // Without an embed (embed_enabled=false, or spawn
-            // failed), focus mode has nothing to attach to.
+        if !self.embed_enabled {
+            // Embeds are off — focus mode has nothing to attach to.
+            // (A missing embed with embeds *on* is fine: narrow
+            // layouts don't spawn one until focus, a spawn may have
+            // failed, or a switch is still parked on the settle
+            // timer. `respawn_embed` below covers all three.)
             return;
         }
+        self.embed_switch = None;
         // Flip the focus flag *before* sizing so `preview_dims`
         // returns the shrunk dimensions that account for the focus
         // border that's about to appear. If we did this after, the
@@ -3631,6 +3758,8 @@ impl App {
         // tmux session, which works fine but pointlessly fans out
         // tmux's relay.
         self.embed = None;
+        self.embed_switch = None;
+        self.ensure_window_size_latest(session);
         let embed = crate::ui::embed_terminal::EmbedTerminal::spawn(
             self.socket.as_deref(),
             session,
@@ -3642,6 +3771,7 @@ impl App {
             self.evt_tx.clone(),
         )?;
         self.embed = Some(embed);
+        self.last_embed_spawn = Some(std::time::Instant::now());
         Ok(())
     }
 

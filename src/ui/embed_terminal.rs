@@ -214,24 +214,9 @@ impl EmbedTerminal {
         // this is only the outer shell hint.
         cmd.env("TERM", "xterm-256color");
 
-        // Reset the session's `window-size` option to `latest`
-        // before we attach. A previous bosun run may have shipped
-        // with the `force_resize_window` code (later reverted),
-        // which called `tmux resize-window -x cols -y rows` — and
-        // that command implicitly sets `window-size=manual` on the
-        // session as a side effect. Manual-mode sessions ignore
-        // client size negotiation entirely, so even after the
-        // resize-window code was removed, sessions created under
-        // the old code stayed pinned to their last size. A
-        // user's full-screen `tmux attach` would then find the
-        // session still at preview width and refuse to grow.
-        //
-        // Setting back to `latest` (tmux's default) restores
-        // automatic negotiation: whichever client was most-
-        // recently active drives the window size. Safe to fire
-        // even on sessions that were never pinned — it's idempotent
-        // with the default. Best-effort; errors are logged.
-        reset_window_size(socket, session);
+        // The `window-size latest` repair for sessions an older bosun
+        // pinned to `manual` now runs once per session per run from
+        // `App::ensure_window_size_latest`, not on every spawn.
 
         let child = pair
             .slave
@@ -487,7 +472,7 @@ fn io_err<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> std::io
 /// the default automatic-negotiation policy on a session that may
 /// have been left pinned to `manual` by a previous bosun run.
 /// Best-effort; logs on failure but never panics.
-fn reset_window_size(socket: Option<&str>, session: &str) {
+pub fn reset_window_size(socket: Option<&str>, session: &str) {
     let mut cmd = std::process::Command::new("tmux");
     if let Some(s) = socket {
         cmd.arg("-L").arg(s);

@@ -222,8 +222,8 @@ pub fn spawn(
                             smoothers.retain(|name, _| views.iter().any(|v| v.name() == name));
 
                             // Only sync the status bar when the set of
-                            // (internal, display, attached) tuples has
-                            // actually changed. Skips the ~N*7 set-option
+                            // (internal, display) tuples has actually
+                            // changed. Skips the ~N*7 set-option
                             // calls on ticks where nothing's moved.
                             let state: Vec<BarSession> = views
                                 .iter()
@@ -256,24 +256,29 @@ pub fn spawn(
                     }
                 }
                 Command::FocusPreview { name } => {
-                    // Set focus, then refresh immediately so the
-                    // preview catches up to the new selection
-                    // without waiting up to 1s for the next
-                    // preview_tick. Without this the user sees a
-                    // stuck "preview: capturing…" when switching
-                    // between sessions quickly.
+                    // Set focus, then capture the newly-focused
+                    // session immediately so the preview catches up
+                    // to the selection without waiting up to 1s for
+                    // the next preview_tick. Without this the user
+                    // sees a stuck "preview: capturing…" when
+                    // switching between sessions quickly.
+                    //
+                    // This used to run a full `do_refresh` — three
+                    // `bind-key` self-heals, `list-sessions`, and a
+                    // `capture-pane` per managed session — on every
+                    // selection change. Moving the cursor through
+                    // the list only needs the *selected* session's
+                    // preview and status to be fresh; everything
+                    // else stays on the 1Hz tick. Same single-
+                    // session path the fast tick uses.
                     focused = Some(name);
-                    let _ = do_refresh(
+                    refresh_focused(
                         &*client,
                         &config,
                         &registry,
                         &mut smoothers,
                         focused.as_deref(),
-                        socket.as_deref(),
-                        &mut last_bar_state,
-                        &mut globals,
                         &evt_tx,
-                        None,
                     )
                     .await;
                 }
@@ -792,69 +797,15 @@ pub fn spawn(
                     if focused.is_none() {
                         continue;
                     }
-                    match client.list_sessions().await {
-                        Ok(raw) => {
-                            let now = SystemTime::now();
-                            for s in raw
-                                .into_iter()
-                                .filter(|s| config.manages(&s.name))
-                                .filter(|s| Some(s.name.as_str()) == focused.as_deref())
-                            {
-                                let bytes = match client.capture_pane(&s.name).await {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "fast capture {}: {}", s.name, e
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let plain = crate::tmux::detector::strip_ansi(&bytes);
-                                let prev = smoothers
-                                    .get(&s.name)
-                                    .map(|sm| sm.current());
-                                let ctx = DetectContext::from_parts(
-                                    &bytes,
-                                    &plain,
-                                    s.last_activity,
-                                    now,
-                                    prev,
-                                    &s.name,
-                                    s.pane_title.as_deref(),
-                                    s.pane_command.as_deref(),
-                                );
-                                let detected = registry.detect(&ctx);
-                                let smoothed = smoothers
-                                    .entry(s.name.clone())
-                                    .or_default()
-                                    .observe(detected);
-                                let publish = if smoothed == Status::Unknown {
-                                    Status::Idle
-                                } else {
-                                    smoothed
-                                };
-                                let _ = evt_tx.send(AppMsg::StatusRefreshed {
-                                    name: s.name.clone(),
-                                    status: publish,
-                                });
-                                // Focused session also gets the
-                                // preview bytes so the right-pane
-                                // capture (and any non-embed preview
-                                // path) stays live at this cadence.
-                                if Some(s.name.as_str()) == focused.as_deref() {
-                                    let arc: Arc<[u8]> =
-                                        Arc::from(bytes.into_boxed_slice());
-                                    let _ = evt_tx.send(AppMsg::PreviewRefreshed {
-                                        name: s.name.clone(),
-                                        bytes: arc,
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("fast list-sessions: {}", e);
-                        }
-                    }
+                    refresh_focused(
+                        &*client,
+                        &config,
+                        &registry,
+                        &mut smoothers,
+                        focused.as_deref(),
+                        &evt_tx,
+                    )
+                    .await;
                 }
             }
         }
@@ -1403,6 +1354,78 @@ async fn resolve_collision(
     Ok(spec)
 }
 
+/// Capture + detect just the focused session and push its status and
+/// preview bytes to the app. One `list-sessions` (for the activity
+/// timestamp and pane metadata the detectors need) plus one
+/// `capture-pane`, regardless of how many sessions bosun manages.
+/// Shared by the fast preview tick and `Command::FocusPreview`.
+/// Failures are logged and dropped; the 1Hz tick reconciles.
+async fn refresh_focused(
+    client: &dyn TmuxClient,
+    config: &Config,
+    registry: &DetectorRegistry,
+    smoothers: &mut HashMap<String, Smoother>,
+    focused: Option<&str>,
+    evt_tx: &mpsc::UnboundedSender<AppMsg>,
+) {
+    let Some(focused) = focused else {
+        return;
+    };
+    let raw = match client.list_sessions().await {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::debug!("focused list-sessions: {}", e);
+            return;
+        }
+    };
+    let now = SystemTime::now();
+    let Some(s) = raw
+        .into_iter()
+        .filter(|s| config.manages(&s.name))
+        .find(|s| s.name == focused)
+    else {
+        return;
+    };
+    let bytes = match client.capture_pane(&s.name).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("focused capture {}: {}", s.name, e);
+            return;
+        }
+    };
+    let plain = crate::tmux::detector::strip_ansi(&bytes);
+    let prev = smoothers.get(&s.name).map(|sm| sm.current());
+    let ctx = DetectContext::from_parts(
+        &bytes,
+        &plain,
+        s.last_activity,
+        now,
+        prev,
+        &s.name,
+        s.pane_title.as_deref(),
+        s.pane_command.as_deref(),
+    );
+    let detected = registry.detect(&ctx);
+    let smoothed = smoothers
+        .entry(s.name.clone())
+        .or_default()
+        .observe(detected);
+    let publish = if smoothed == Status::Unknown {
+        Status::Idle
+    } else {
+        smoothed
+    };
+    let _ = evt_tx.send(AppMsg::StatusRefreshed {
+        name: s.name.clone(),
+        status: publish,
+    });
+    let arc: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+    let _ = evt_tx.send(AppMsg::PreviewRefreshed {
+        name: s.name,
+        bytes: arc,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn do_refresh(
     client: &dyn TmuxClient,
@@ -1449,13 +1472,19 @@ async fn do_refresh(
     Ok(())
 }
 
+/// Whether the status bar needs rewriting. Compares membership, order
+/// and display names only. `attached` is deliberately ignored: nothing
+/// `sync_status_bar` writes depends on it, and bosun's own embed
+/// attach/detach flips it on every sidebar move — comparing it made
+/// each selection change cost a full rewrite (`show-options` + seven
+/// `set-option`s per session + rebinding the nine jump keys).
 fn bar_state_equal(a: &[BarSession], b: &[BarSession]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| {
-        x.internal == y.internal && x.display == y.display && x.attached == y.attached
-    })
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| x.internal == y.internal && x.display == y.display)
 }
 
 fn sync_status_bar(socket: Option<&str>, sessions: &[BarSession], globals: &mut GlobalsGuard) {
