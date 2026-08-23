@@ -4,6 +4,39 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-08-23
+
+### Fixed
+- **Real cursor in the embedded preview.** The preview used to paint
+  a gray block glyph at the inner app's cursor while the terminal's
+  own cursor stayed hidden, parked wherever the last redraw ended.
+  Mosh-based clients (Moshi on iOS) tracked that hidden, wandering
+  cursor and, after a tap-to-position in the Claude Code input box,
+  left ghost cursors across the output until a Ctrl-L repaint. Bosun
+  now drives the terminal's actual cursor to the inner cursor cell
+  (honouring the inner app's hide/show state), so you also get your
+  terminal's native cursor shape and blink instead of a block.
+- **Narrow layouts no longer shrink sessions to 20×3.** On a phone-
+  width terminal the unfocused layout has no preview area, but bosun
+  still attached a minimum-size embed to whichever session the cursor
+  was on — and because that attach takes part in tmux's size
+  negotiation, every session you scrolled past was resized to 20×3,
+  then reflowed back up when you landed on it. No embed is spawned
+  until there's somewhere to draw it; Enter still attaches full-body.
+
+### Changed
+- **Sidebar navigation is much cheaper.** Moving through the session
+  list cost ~10 tmux processes per keypress (a full kill + attach of
+  the embed, a capture-pane for every managed session, three
+  `bind-key` self-heals, and a full status-bar rewrite every time
+  tmux's attached flag flipped). An isolated keypress still attaches
+  instantly, but holding Up/Down now shows cheap `capture-pane`
+  snapshots and attaches once the cursor rests; `FocusPreview` only
+  captures the selected session; the `window-size` reset runs once
+  per session; and the status bar is only rewritten when membership
+  or names change. 18 rapid presses across four sessions went from
+  278 tmux execs to 95 at desktop width and 74 at phone width.
+
 ## [2.1.1] — 2026-08-18
 
 ### Changed
