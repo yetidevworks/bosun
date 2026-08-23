@@ -4,6 +4,17 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.6] — 2026-08-23
+
+### Fixed
+- **Killing your last session no longer raises a spurious list
+  warning.** tmux answers a session query with "server exited
+  unexpectedly" when the query races the server shutdown that killing
+  the last session triggers. Bosun already understood tmux's other
+  three ways of saying "nothing to list" but not this one, so it
+  reported an error instead of showing an empty sidebar. (Also the
+  cause of a red integration job on the 2.1.5 release.)
+
 ## [2.1.5] — 2026-08-23
 
 ### Fixed
