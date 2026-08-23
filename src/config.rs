@@ -79,6 +79,30 @@ pub const DEFAULT_TMUX_SOCKET: &str = "bosun";
 /// Default theme name — must match a built-in in `ui::theme`.
 pub const DEFAULT_THEME: &str = "opencode";
 
+/// Agent preselected when creating a session unless overridden in
+/// `config.toml` with `default_agent`.
+pub const DEFAULT_AGENT: &str = "claude";
+
+fn default_agent(value: Option<String>) -> String {
+    let Some(value) = value else {
+        return DEFAULT_AGENT.to_string();
+    };
+    let value = value.trim().to_ascii_lowercase();
+    if matches!(
+        value.as_str(),
+        "claude" | "codex" | "kimi" | "opencode" | "qwen" | "terminal"
+    ) {
+        value
+    } else {
+        tracing::warn!(
+            configured_agent = %value,
+            default_agent = DEFAULT_AGENT,
+            "ignoring invalid default agent in config"
+        );
+        DEFAULT_AGENT.to_string()
+    }
+}
+
 /// Where a new git worktree is placed relative to its repo root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -177,6 +201,9 @@ pub struct Config {
     pub show_group_in_title: bool,
     /// Where `git worktree add` places new worktrees. See `WorktreeLocation`.
     pub worktree_location: WorktreeLocation,
+    /// Agent preselected by the new-session form. Invalid or missing
+    /// values fall back to `claude`.
+    pub default_agent: String,
     /// Per-agent binary overrides from the `[agents]` table in
     /// `config.toml`, e.g. `opencode = "~/bin/opencode-wrapper"`.
     /// The value replaces the agent's binary in the launch command
@@ -208,6 +235,7 @@ impl Default for Config {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            default_agent: DEFAULT_AGENT.to_string(),
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -282,6 +310,10 @@ struct ConfigFile {
     /// Worktree placement scheme. See `Config::worktree_location`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree_location: Option<WorktreeLocation>,
+    /// Agent preselected by the new-session form. Must be one of
+    /// `claude`, `codex`, `kimi`, `opencode`, `qwen`, or `terminal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_agent: Option<String>,
     /// Per-agent binary overrides. See `Config::agent_binaries`.
     /// Persisted as the `[agents]` table:
     /// ```toml
@@ -406,6 +438,7 @@ impl Config {
         };
 
         let worktree_location = file.worktree_location.unwrap_or_default();
+        let default_agent = default_agent(file.default_agent);
 
         let agent_binaries = file.agents.unwrap_or_default();
 
@@ -425,6 +458,7 @@ impl Config {
             sidebar_hidden,
             show_group_in_title,
             worktree_location,
+            default_agent,
             agent_binaries,
         }
     }
@@ -757,6 +791,7 @@ mod tests {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            default_agent: DEFAULT_AGENT.to_string(),
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -802,10 +837,18 @@ mod tests {
             sidebar_hidden: false,
             show_group_in_title: DEFAULT_SHOW_GROUP_IN_TITLE,
             worktree_location: WorktreeLocation::default(),
+            default_agent: DEFAULT_AGENT.to_string(),
             agent_binaries: std::collections::HashMap::new(),
         };
         assert!(!c.manages("bosun-mine-abc"));
         assert!(c.manages("bosun-other-xyz"));
+    }
+
+    #[test]
+    fn default_agent_accepts_opencode_and_falls_back_to_claude() {
+        assert_eq!(default_agent(Some("opencode".to_string())), "opencode");
+        assert_eq!(default_agent(None), DEFAULT_AGENT);
+        assert_eq!(default_agent(Some("unknown".to_string())), DEFAULT_AGENT);
     }
 
     #[test]

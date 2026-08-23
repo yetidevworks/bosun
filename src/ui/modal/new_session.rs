@@ -182,6 +182,14 @@ struct PathEntry {
 
 impl NewSessionModal {
     pub fn new(recents: Vec<Recent>, worktree_location: crate::config::WorktreeLocation) -> Self {
+        Self::with_default_agent(recents, worktree_location, crate::config::DEFAULT_AGENT)
+    }
+
+    pub fn with_default_agent(
+        recents: Vec<Recent>,
+        worktree_location: crate::config::WorktreeLocation,
+        default_agent: &str,
+    ) -> Self {
         // Default the path to the most-recently-used session's path so
         // the modal "remembers" where you last worked across restarts.
         // Falls back to cwd (and then to ~) when there are no recents.
@@ -200,7 +208,10 @@ impl NewSessionModal {
             worktree: false,
             branch: String::new(),
             branch_edited: false,
-            agent_idx: 0,
+            agent_idx: AGENTS
+                .iter()
+                .position(|agent| *agent == default_agent)
+                .unwrap_or(0),
             args: String::new(),
             claude: ClaudeOptions::default(),
             codex: CodexOptions::default(),

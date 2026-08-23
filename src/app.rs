@@ -229,6 +229,8 @@ pub struct AppState {
     /// new-session modal so its worktree preview line shows the same
     /// scheme the tmux actor resolves downstream.
     pub worktree_location: crate::config::WorktreeLocation,
+    /// Agent preselected when the new-session modal opens.
+    pub default_agent: String,
 }
 
 /// What the user has "seen" for one session — the baseline the unread
@@ -2276,6 +2278,7 @@ impl App {
             sidebar_hidden: config.sidebar_hidden,
             show_group_in_title: config.show_group_in_title,
             worktree_location: config.worktree_location,
+            default_agent: config.default_agent,
             ..Default::default()
         };
 
@@ -3007,10 +3010,13 @@ impl App {
                 match req {
                     ModalRequest::NewSession => {
                         let recents = self.store.list_recents(50).unwrap_or_default();
-                        self.state.modals.push(Box::new(NewSessionModal::new(
-                            recents,
-                            self.state.worktree_location,
-                        )));
+                        self.state
+                            .modals
+                            .push(Box::new(NewSessionModal::with_default_agent(
+                                recents,
+                                self.state.worktree_location,
+                                &self.state.default_agent,
+                            )));
                     }
                     ModalRequest::Theme => {
                         let names = Theme::available(crate::config::user_themes_dir().as_deref());
