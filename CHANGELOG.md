@@ -4,6 +4,20 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.5] — 2026-08-23
+
+### Fixed
+- **Switching is instant again, without the stray keystrokes.** 2.1.4
+  stopped the injected newline/Ctrl-D by detaching the preview client
+  with SIGHUP, but a tmux client ignores SIGHUP for a while — the old
+  client stayed alive ~580 ms after each switch, overlapping the new
+  one on tmux's single-threaded server. That brought back the sluggish
+  switching and made a focused Shift+Up/Down cycle repaint garbled for
+  a second. The client is killed immediately again, and the PTY is now
+  closed only after the client has actually been reaped — which is
+  what 2.1.3 got wrong and what caused the stray bytes in the first
+  place. Fast, and nothing reaches the pane.
+
 ## [2.1.4] — 2026-08-23
 
 ### Fixed
