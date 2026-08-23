@@ -457,42 +457,60 @@ impl EmbedTerminal {
 impl Drop for EmbedTerminal {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Detach the `tmux attach` client cleanly, but do it entirely
-        // on a detached thread so the app loop never blocks.
+        // Tear the `tmux attach` client down instantly, but drop its
+        // PTY only once it is confirmed dead — and do the waiting on a
+        // detached thread so the app loop never blocks.
         //
-        // The clean part matters: the tmux client must exit *itself*
-        // (on SIGHUP) with its controlling PTY still open. If we
-        // instead SIGKILL it and close the master out from under it,
-        // the abrupt teardown makes the kernel line discipline flush
-        // `\n\x04` (newline + EOT) down to the session's pane — a
-        // stray Enter plus Ctrl-D that adds a blank line to an agent's
-        // composer and makes a bare shell hit EOF and exit. So we send
-        // SIGHUP (via `Child::kill`, which also escalates to SIGKILL
-        // after a grace period if needed) and only drop the master
-        // *after* the client has gone.
+        // Both halves are load-bearing, and getting either wrong broke
+        // a release:
         //
-        // The speed part matters too: `Child::kill` sleeps in 50ms
-        // steps polling for exit — up to ~200ms — and a tmux client
-        // doesn't exit on SIGHUP instantly. Running that on the app
-        // loop was the ~210ms keypress lag when moving through the
-        // sidebar. Moving the whole detach+wait+master-drop onto the
-        // reaper thread keeps the loop instant and the detach clean.
+        // * SIGKILL, not `Child::kill`. portable_pty's unix `kill`
+        //   sends SIGHUP and then polls for exit in 50ms steps for up
+        //   to ~200ms before escalating; a tmux client doesn't exit on
+        //   SIGHUP inside that window. Running that inline was the
+        //   ~210ms keypress lag (2.1.2 and earlier). Merely moving it
+        //   off-thread (2.1.4) kept the loop free but left the old
+        //   client alive for those 200ms, so fast navigation piled
+        //   several attach clients onto tmux's single-threaded server
+        //   — switching felt slow again and repaints came through
+        //   garbled.
+        //
+        // * Drop the master only after `wait`. Closing the PTY master
+        //   while the client is still alive makes the line discipline
+        //   push `\n\x04` (newline + EOT) at the slave, and the tmux
+        //   client — which reads its stdin from that slave — forwards
+        //   it to the session as keystrokes: a blank line in an
+        //   agent's composer, and a Ctrl-D that makes a bare shell
+        //   exit. 2.1.3 hit exactly this by SIGKILLing while the
+        //   struct's own `master` field dropped on the main thread,
+        //   racing the signal. Handing master + writer to the reaper
+        //   and dropping them after `wait` closes that race: the
+        //   client is already gone, so there is nobody left to forward
+        //   whatever the close flushes.
         let child = self.child.take();
         let master = self.master.take();
         let writer = self.writer.take();
-        let name = self.session.clone();
+        if let Some(pid) = child.as_ref().and_then(|c| c.process_id()) {
+            // SAFETY: a plain signal to a pid we spawned and still own
+            // (it has not been reaped — `wait` runs on the thread below).
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
         let _ = thread::Builder::new()
             .name(format!("bosun-embed-reap-{}", self.session))
             .spawn(move || {
                 if let Some(mut child) = child {
+                    // Already SIGKILLed above; this just reaps it so no
+                    // zombie lingers. Falls back to `kill` if we could
+                    // not read a pid.
                     let _ = child.kill();
                     let _ = child.wait();
                 }
-                // Drop the master and writer only now that the client
-                // has exited, so its PTY is never closed mid-detach.
+                // Only now that the client is gone is it safe to close
+                // the PTY — see the note above.
                 drop(writer);
                 drop(master);
-                let _ = name;
             });
     }
 }
