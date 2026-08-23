@@ -4,6 +4,18 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.10] — unreleased
+
+### Added
+- **Choose which agent the new-session form starts on.** Set
+  `default_agent = "opencode"` (or any other agent) in `config.toml`
+  and both the new-session dialog and the add-tab form open with it
+  preselected, instead of always starting on `claude`. An unset or
+  unrecognised name keeps the previous behaviour. Contributed by
+  [@attilaolah](https://github.com/attilaolah) ([#13]).
+
+[#13]: https://github.com/yetidevworks/bosun/pull/13
+
 ## [2.1.9] — 2026-08-23
 
 ### Fixed
