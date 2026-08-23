@@ -648,23 +648,14 @@ impl Modal for NewSessionModal {
                 ModalResult::Close(None)
             }
             KeyCode::Tab => {
-                if self.field == Field::Path {
-                    // 1. If the user arrowed into the dropdown, Tab
-                    //    commits the highlighted entry. For dirs we
-                    //    stay on the field so they can dive further.
-                    if let Some(idx) = self.path_suggestion_idx {
-                        let entries = self.path_suggestions();
-                        if let Some(entry) = entries.get(idx).cloned() {
-                            self.commit_path_entry(&entry);
-                            return ModalResult::Consumed;
-                        }
-                    }
-                    // 2. Shell-style LCP completion against the live
-                    //    filesystem.
-                    if self.tab_complete_path() {
-                        return ModalResult::Consumed;
-                    }
-                }
+                // Tab always advances, on every field including Path.
+                // It used to complete the path first and only fall
+                // through to the next field when there was nothing left
+                // to complete — but there almost always was, so Tab
+                // effectively stopped working as "next field" and the
+                // user had to press Esc to escape the field. The footer
+                // promises "tab next"; path completion lives on Right
+                // instead (see below).
                 self.next_field();
                 ModalResult::Consumed
             }
@@ -731,6 +722,22 @@ impl Modal for NewSessionModal {
                     }
                     _ => {}
                 }
+                ModalResult::Consumed
+            }
+            // Right accepts a path completion, the way a shell's
+            // autosuggestion does: the highlighted dropdown entry if the
+            // user arrowed into one, otherwise the longest common prefix
+            // of what matches. The Path field has no in-field cursor, so
+            // Right is free for this.
+            KeyCode::Right if self.field == Field::Path => {
+                if let Some(idx) = self.path_suggestion_idx {
+                    let entries = self.path_suggestions();
+                    if let Some(entry) = entries.get(idx).cloned() {
+                        self.commit_path_entry(&entry);
+                        return ModalResult::Consumed;
+                    }
+                }
+                self.tab_complete_path();
                 ModalResult::Consumed
             }
             KeyCode::Right => {
@@ -961,7 +968,11 @@ impl Modal for NewSessionModal {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "    tab next · ^r recents · esc cancel · enter create",
+                    if self.field == Field::Path {
+                        "    tab next · → complete · ^r recents · esc cancel"
+                    } else {
+                        "    tab next · ^r recents · esc cancel · enter create"
+                    },
                     Style::default().fg(theme.text_muted).bg(body_bg),
                 ),
             ]),
@@ -1259,19 +1270,6 @@ fn split_path(path: &str) -> (String, String) {
     }
 }
 
-/// Expand a leading `~` or `~/` to `$HOME`. Only used for the actual
-/// `read_dir` call; the stored path retains the user's form.
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return std::env::var("HOME").unwrap_or_default();
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        return format!("{}/{}", home, rest);
-    }
-    path.to_string()
-}
-
 /// Read the directory implied by `path` and return entries whose
 /// names start with the trailing segment of `path`. Dirs come first,
 /// then files, alphabetically within each group. Hidden entries
@@ -1283,7 +1281,7 @@ fn read_dir_filtered(path: &str, limit: usize) -> Vec<PathEntry> {
     let lookup = if dir.is_empty() {
         ".".to_string()
     } else {
-        expand_tilde(&dir)
+        crate::util::path::expand_tilde(&dir)
     };
     let Ok(read) = std::fs::read_dir(&lookup) else {
         return Vec::new();
@@ -1530,6 +1528,77 @@ mod tests {
         let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
         m.path = "/_bosun_unit_test_nonexistent_/".into();
         m
+    }
+
+    /// A directory with two `zebra_*` children, so completion has a
+    /// longest common prefix to extend to and the dropdown is non-empty.
+    fn dir_with_completions() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "bosun-complete-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(base.join("zebra_one")).expect("mkdir");
+        std::fs::create_dir_all(base.join("zebra_two")).expect("mkdir");
+        base
+    }
+
+    #[test]
+    fn tab_advances_from_path_even_when_completions_exist() {
+        let base = dir_with_completions();
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        m.field = Field::Path;
+        m.path = format!("{}/z", base.display());
+        let typed = m.path.clone();
+
+        m.handle(key(KeyCode::Tab));
+
+        // Tab is "next field" everywhere — it must not silently turn
+        // into a completion just because the Path field had matches.
+        assert_eq!(m.field, Field::Worktree, "Tab should advance off Path");
+        assert_eq!(m.path, typed, "Tab should not rewrite the path");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn right_completes_path_and_stays_on_the_field() {
+        let base = dir_with_completions();
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        m.field = Field::Path;
+        m.path = format!("{}/z", base.display());
+
+        m.handle(key(KeyCode::Right));
+
+        assert_eq!(
+            m.path,
+            format!("{}/zebra_", base.display()),
+            "Right should extend to the longest common prefix"
+        );
+        assert_eq!(
+            m.field,
+            Field::Path,
+            "completing should not leave the field"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn right_commits_the_highlighted_dropdown_entry() {
+        let base = dir_with_completions();
+        let mut m = NewSessionModal::new(Vec::new(), WorktreeLocation::default());
+        m.field = Field::Path;
+        m.path = format!("{}/z", base.display());
+
+        m.handle(key(KeyCode::Down)); // arrow into the dropdown
+        m.handle(key(KeyCode::Right)); // accept what's highlighted
+
+        assert_eq!(
+            m.path,
+            format!("{}/zebra_one/", base.display()),
+            "Right should commit the highlighted entry, with a trailing slash for a dir"
+        );
+        assert_eq!(m.field, Field::Path);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
