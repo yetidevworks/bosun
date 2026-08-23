@@ -127,7 +127,9 @@ pub struct EmbedTerminal {
     /// keystroke. Always Some after construction; the Option is
     /// only there to satisfy the borrow checker around `take_writer`.
     writer: Option<Box<dyn Write + Send>>,
-    child: Box<dyn Child + Send + Sync>,
+    /// The `tmux attach` client. `Option` so `Drop` can move it onto a
+    /// reaper thread after signalling it.
+    child: Option<Box<dyn Child + Send + Sync>>,
     /// Belt-and-braces signal for the reader thread. The reliable
     /// stop is the child's death (master fd closes → reader sees
     /// EOF), but the flag lets the loop exit at the next read
@@ -286,7 +288,7 @@ impl EmbedTerminal {
             parser,
             master: pair.master,
             writer: Some(writer),
-            child,
+            child: Some(child),
             stop,
             rows,
             cols,
@@ -455,7 +457,30 @@ impl Drop for EmbedTerminal {
         // then hits EOF and the reader thread exits naturally. We
         // intentionally do NOT join the thread here — if the child
         // wedges, joining would block the app's shutdown path.
-        let _ = self.child.kill();
+        //
+        // SIGKILL directly rather than `Child::kill`: portable_pty's
+        // unix `kill` sends SIGHUP and then sleeps in 50ms steps
+        // polling for exit — up to 200ms — before escalating. A tmux
+        // client doesn't exit on SIGHUP inside that window, so every
+        // embed drop stalled the app loop for ~210ms: the keypress lag
+        // when moving through the sidebar. tmux's server copes with an
+        // abruptly dead client the same way it did with the eventual
+        // SIGKILL. The `wait` moves to a detached thread so the loop
+        // never blocks on it and the client doesn't linger as a zombie.
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pid) = child.process_id() {
+            // SAFETY: plain syscall on a pid we spawned and still own.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = thread::Builder::new()
+            .name(format!("bosun-embed-reap-{}", self.session))
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 }
 
