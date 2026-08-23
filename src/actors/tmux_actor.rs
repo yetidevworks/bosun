@@ -1157,6 +1157,16 @@ async fn create_session(
     // `spec` is taken by value (see the fn signature), so rebinding as
     // mut is valid and later shared reads/clones of `spec` still compile.
     let mut spec = spec;
+    // Expand a leading `~` before the path reaches anything that won't
+    // do it for us. tmux doesn't expand tildes in `new-session -c`, and
+    // when the directory doesn't exist it silently falls back to $HOME
+    // — so `~/work` used to produce a session sitting in `~` instead
+    // (issue #10). `git -C` (the worktree path below) has the same
+    // blind spot. Doing it here rather than in the new-session modal
+    // covers every source of a spec: the modal, a recents entry stored
+    // in the old unexpanded form, and a restart rebuilt from session
+    // metadata.
+    spec.path = crate::util::path::expand_tilde(&spec.path);
     // When we create a worktree below, remember (repo, worktree_path, branch)
     // so we can roll it back if a later step (the tmux `create_session`)
     // fails — otherwise the worktree + its new branch would be orphaned with

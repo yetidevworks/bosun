@@ -97,3 +97,78 @@ async fn create_session_without_display_name_does_not_set_option() {
 
     kill_server(&sock);
 }
+
+/// Regression for issue #10: a session created with a `~/…` path used
+/// to end up in `$HOME` without the subpath.
+///
+/// The trap is that tmux neither expands the tilde nor complains about
+/// it — given a `-c` directory that doesn't exist it silently starts
+/// the session in `$HOME`, so the mistake is invisible until you look
+/// at where the session actually is. This test pins both halves: the
+/// raw tilde really does misbehave, and the path bosun now hands tmux
+/// (run through `expand_tilde`) lands in the right directory.
+#[tokio::test(flavor = "current_thread")]
+async fn tilde_path_is_expanded_before_reaching_tmux() {
+    let Ok(home) = std::env::var("HOME") else {
+        return; // no HOME to expand against; nothing to assert
+    };
+    let sock = unique_socket("tilde");
+    let client = TokioTmuxClient::with_socket(sock.clone());
+
+    // A real directory under $HOME to aim at, so "landed in the right
+    // place" is distinguishable from tmux's $HOME fallback.
+    let leaf = format!(".bosun-tilde-it-{}", std::process::id());
+    let target = format!("{home}/{leaf}");
+    std::fs::create_dir_all(&target).expect("create target dir");
+
+    let mk = |name: &str, path: String| CreateSpec {
+        name: name.to_string(),
+        display_name: Some(name.to_string()),
+        path,
+        command: String::new(),
+        metadata: None,
+    };
+
+    // What bosun sends today: expanded.
+    client
+        .create_session(&mk(
+            "bosun-tilde-ok",
+            bosun::util::path::expand_tilde(&format!("~/{leaf}")),
+        ))
+        .await
+        .expect("create expanded");
+    // What it used to send: the raw tilde.
+    client
+        .create_session(&mk("bosun-tilde-raw", format!("~/{leaf}")))
+        .await
+        .expect("create raw");
+
+    let cwd = |session: &str| {
+        let out = tmux(
+            &sock,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{pane_current_path}",
+            ],
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    assert_eq!(
+        cwd("bosun-tilde-ok"),
+        target,
+        "expanded path should land in the subdirectory"
+    );
+    assert_ne!(
+        cwd("bosun-tilde-raw"),
+        target,
+        "sanity: tmux does not expand a tilde itself — if this ever starts \
+         passing, tmux learned to expand and the fix could be revisited"
+    );
+
+    kill_server(&sock);
+    let _ = std::fs::remove_dir(&target);
+}
