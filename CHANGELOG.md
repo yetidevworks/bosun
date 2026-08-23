@@ -4,6 +4,21 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] — 2026-08-23
+
+### Fixed
+- **Sidebar keypresses no longer stall for 200 ms.** Every move that
+  left a session dropped its embedded `tmux attach` client through
+  `portable_pty`'s `kill`, which sends SIGHUP and then polls for exit
+  in 50 ms steps for up to 200 ms before escalating to SIGKILL — and a
+  tmux client doesn't exit on SIGHUP inside that window. The app loop
+  blocked for ~210 ms on every selection change, which is the lag you
+  felt moving up and down the list (present since the embedded preview
+  arrived in 2.0). The client is now SIGKILLed directly and reaped on a
+  background thread: keypress-to-cursor went from ~230 ms to ~15 ms,
+  and a burst of 8 rapid presses settles 4 ms after the last key
+  instead of half a second.
+
 ## [2.1.2] — 2026-08-23
 
 ### Fixed
