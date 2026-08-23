@@ -4,7 +4,18 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.10] — unreleased
+## [2.1.10] — 2026-08-23
+
+### Fixed
+- **The drop shadow keeps the styling of what's behind it.** 2.1.8's
+  fix for styling bleeding through dialogs went one step too far and
+  also stripped it from the shadow, so underlined text behind a dialog
+  had its underlines stop at the shadow and start again past it. The
+  shadow darkens what it falls across again; the dialog body itself is
+  still opaque. Spotted by
+  [@attilaolah](https://github.com/attilaolah) ([#12]).
+
+[#12]: https://github.com/yetidevworks/bosun/issues/12
 
 ### Added
 - **Choose which agent the new-session form starts on.** Set
