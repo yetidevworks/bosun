@@ -68,6 +68,19 @@ impl Row {
     /// One line explaining what the option actually does, shown under
     /// the highlighted row. The panel is the only place most of these
     /// are documented outside the README.
+    /// Key used to look up an environment pin for this row, if the
+    /// setting has one. See `config::env_pin`.
+    fn env_key(self) -> Option<&'static str> {
+        match self {
+            Row::Theme => Some("theme"),
+            Row::DefaultAgent => Some("default_agent"),
+            Row::RemoveDeadSessions => Some("remove_dead_sessions"),
+            Row::ShowGroupInTitle => Some("show_group_in_title"),
+            Row::EmbedEnabled => Some("embed_enabled"),
+            Row::BannerFont | Row::WorktreeLocation | Row::SingleWindow => None,
+        }
+    }
+
     fn help(self) -> &'static str {
         match self {
             Row::Theme => "colors for the whole UI",
@@ -85,6 +98,11 @@ impl Row {
 /// Current values, handed in when the panel opens.
 #[derive(Debug, Clone)]
 pub struct SettingsValues {
+    /// Settings currently pinned by an environment variable, keyed by
+    /// `Row::env_key`, with the variable's name as the value. Resolved
+    /// by the caller so the modal stays free of ambient state — see
+    /// `config::env_pin`.
+    pub pins: std::collections::HashMap<&'static str, &'static str>,
     pub theme: String,
     pub themes: Vec<String>,
     pub banner_font: String,
@@ -114,6 +132,11 @@ impl SettingsModal {
         Row::ALL[self.selected.min(Row::ALL.len() - 1)]
     }
 
+    /// The environment variable pinning `row`, if any.
+    fn pinned_by(&self, row: Row) -> Option<&'static str> {
+        row.env_key().and_then(|k| self.values.pins.get(k).copied())
+    }
+
     /// Rendered value for a row.
     fn value_of(&self, row: Row) -> String {
         let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
@@ -137,6 +160,12 @@ impl SettingsModal {
     /// return the change to apply. Booleans ignore the direction.
     fn cycle(&mut self, delta: i32) -> Option<SettingChange> {
         let row = self.row();
+        // Changing a pinned row would write to config.toml and then be
+        // overridden by the environment on the next launch — so don't
+        // pretend it worked.
+        if self.pinned_by(row).is_some() {
+            return None;
+        }
         let change = match row {
             Row::Theme => {
                 let next = step(&self.values.themes, &self.values.theme, delta)?;
@@ -280,6 +309,14 @@ impl Modal for SettingsModal {
             .max()
             .unwrap_or(0);
 
+        // Pin markers sit in their own column so they line up rather
+        // than trailing values of differing lengths.
+        let value_width = Row::ALL
+            .iter()
+            .map(|r| self.value_of(*r).chars().count())
+            .max()
+            .unwrap_or(0);
+
         for (i, row) in Row::ALL.iter().enumerate() {
             let selected = i == self.selected;
             let marker = if selected { "▸ " } else { "  " };
@@ -298,17 +335,37 @@ impl Modal for SettingsModal {
             } else {
                 Style::default().fg(theme.text).bg(body_bg)
             };
-            lines.push(Line::from(vec![
+            let pinned = self.pinned_by(*row).is_some();
+            let value = if pinned {
+                format!("{:<width$}", value, width = value_width)
+            } else {
+                value
+            };
+            let mut spans = vec![
                 Span::styled(marker, label_style),
                 Span::styled(label, label_style),
                 Span::styled("   ", Style::default().bg(body_bg)),
                 Span::styled(value, value_style),
-            ]));
+            ];
+            if pinned {
+                // Just a marker: the variable names are long enough
+                // (`BOSUN_REMOVE_DEAD_SESSIONS`) to overflow the panel,
+                // so the footer names the exact one for the selected row.
+                spans.push(Span::styled(
+                    "   env",
+                    Style::default().fg(theme.dim_fg).bg(body_bg),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
 
         lines.push(Line::from(""));
+        let footer = match self.pinned_by(self.row()) {
+            Some(var) => format!("  set by {var} — unset it to change this here"),
+            None => format!("  {}", self.row().help()),
+        };
         lines.push(Line::from(Span::styled(
-            format!("  {}", self.row().help()),
+            footer,
             Style::default().fg(theme.dim_fg).bg(body_bg),
         )));
 
@@ -326,6 +383,7 @@ mod tests {
 
     fn values() -> SettingsValues {
         SettingsValues {
+            pins: std::collections::HashMap::new(),
             theme: "opencode".into(),
             themes: vec!["opencode".into(), "gruvbox".into()],
             banner_font: "newsx".into(),
@@ -400,6 +458,37 @@ mod tests {
         for agent in crate::config::AGENTS {
             assert!(seen.contains(&agent.to_string()), "{agent} unreachable");
         }
+    }
+
+    /// Issue #15: a setting pinned by an environment variable would be
+    /// written to config.toml and then overridden again on the next
+    /// launch, so the panel refuses to change it rather than pretending.
+    #[test]
+    fn a_pinned_row_cannot_be_changed() {
+        let mut v = values();
+        v.pins.insert("default_agent", "BOSUN_DEFAULT_AGENT");
+        let mut m = SettingsModal::new(v);
+        m.selected = Row::ALL
+            .iter()
+            .position(|r| *r == Row::DefaultAgent)
+            .unwrap();
+
+        assert_eq!(change(&mut m, KeyCode::Right), None, "no change is emitted");
+        assert_eq!(
+            m.value_of(Row::DefaultAgent),
+            "claude",
+            "and the shown value stays put"
+        );
+
+        // An unpinned row on the same panel still works.
+        m.selected = Row::ALL
+            .iter()
+            .position(|r| *r == Row::RemoveDeadSessions)
+            .unwrap();
+        assert_eq!(
+            change(&mut m, KeyCode::Right),
+            Some(SettingChange::RemoveDeadSessions(true))
+        );
     }
 
     #[test]

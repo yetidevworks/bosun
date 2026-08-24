@@ -18,6 +18,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [@attilaolah](https://github.com/attilaolah) ([#14]).
 
 ### Added
+- **A settings panel.** `s` (or `,`) opens the `config.toml` options —
+  theme, banner font, default agent, worktree location, single-window
+  mode, group-in-tab-title, remove-exited-sessions and the live
+  preview — as an editable list. `↑`/`↓` picks a row, `←`/`→` changes
+  it; there is no save step, each change applies and is written to
+  `config.toml` immediately. Install-level settings (`session_prefix`,
+  `tmux_socket`, the `[agents]` overrides) stay file-only.
+- **`BOSUN_DEFAULT_AGENT` and `BOSUN_REMOVE_DEAD_SESSIONS`** join the
+  existing environment overrides, so either can be set for one launch
+  or one machine without editing `config.toml`. A setting pinned by a
+  variable is tagged `env` in the settings panel and is read-only
+  there — writing it to the file would only be overridden again at the
+  next launch. Suggested by
+  [@attilaolah](https://github.com/attilaolah) ([#15]).
 - **`remove_dead_sessions`** in `config.toml`. Off by default; set it
   to `true` and a session's row disappears when its tmux session ends,
   instead of staying as an `exited` row. Rows that were already gone
@@ -26,6 +40,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sidebar.
 
 [#14]: https://github.com/yetidevworks/bosun/issues/14
+[#15]: https://github.com/yetidevworks/bosun/issues/15
 
 ## [2.1.10] — 2026-08-23
 

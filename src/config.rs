@@ -454,10 +454,29 @@ impl Config {
         };
 
         let worktree_location = file.worktree_location.unwrap_or_default();
-        let default_agent = default_agent(file.default_agent);
-        let remove_dead_sessions = file
-            .remove_dead_sessions
-            .unwrap_or(DEFAULT_REMOVE_DEAD_SESSIONS);
+
+        // Env beats file for these two, like the flags above. Bosun
+        // rewrites config.toml as you use it (sidebar layout, divider,
+        // and now every settings-panel row), so a setup that manages
+        // its config declaratively — Nix home-manager and friends —
+        // can't rely on the file staying put. An environment variable
+        // is somewhere bosun never writes, so it holds. See issue #15.
+        let default_agent = match env::var("BOSUN_DEFAULT_AGENT") {
+            Ok(s) => default_agent(Some(s)),
+            Err(_) => default_agent(file.default_agent),
+        };
+        // Same enable/disable idiom as BOSUN_SHOW_GROUP_IN_TITLE: this
+        // is off by default, so an empty value disables rather than
+        // silently enabling.
+        let remove_dead_sessions = match env::var("BOSUN_REMOVE_DEAD_SESSIONS") {
+            Ok(s) => !matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "off" | "no"
+            ),
+            Err(_) => file
+                .remove_dead_sessions
+                .unwrap_or(DEFAULT_REMOVE_DEAD_SESSIONS),
+        };
 
         let agent_binaries = file.agents.unwrap_or_default();
 
@@ -571,6 +590,25 @@ fn read_config_file() -> Option<ConfigFile> {
 /// dir can't be resolved or writing fails — callers (the theme
 /// picker) surface this as a warning in the status bar but still
 /// apply the change to the live UI.
+/// Environment variable that pins a given setting, if one is set.
+///
+/// Env beats file for these, and bosun never writes to the environment
+/// — which is the point for setups that manage config declaratively
+/// (issue #15). The settings panel uses this to mark a row as pinned
+/// rather than letting the user change something that would snap back
+/// on the next launch.
+pub fn env_pin(setting: &str) -> Option<&'static str> {
+    let var = match setting {
+        "theme" => "BOSUN_THEME",
+        "default_agent" => "BOSUN_DEFAULT_AGENT",
+        "remove_dead_sessions" => "BOSUN_REMOVE_DEAD_SESSIONS",
+        "show_group_in_title" => "BOSUN_SHOW_GROUP_IN_TITLE",
+        "embed_enabled" => "BOSUN_EMBED",
+        _ => return None,
+    };
+    std::env::var(var).ok().map(|_| var)
+}
+
 /// Read `config.toml`, hand the parsed form to `edit`, and write it
 /// back atomically (temp file + rename, so a kill mid-write can't
 /// leave a truncated config). Fields we don't touch survive because

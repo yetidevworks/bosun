@@ -3067,7 +3067,20 @@ impl App {
                     }
                     ModalRequest::Settings => {
                         let themes = Theme::available(crate::config::user_themes_dir().as_deref());
+                        let mut pins = std::collections::HashMap::new();
+                        for key in [
+                            "theme",
+                            "default_agent",
+                            "remove_dead_sessions",
+                            "show_group_in_title",
+                            "embed_enabled",
+                        ] {
+                            if let Some(var) = crate::config::env_pin(key) {
+                                pins.insert(key, var);
+                            }
+                        }
                         let values = crate::ui::modal::settings::SettingsValues {
+                            pins,
                             theme: self.theme.name.clone(),
                             themes,
                             banner_font: self.state.banner_font.clone(),

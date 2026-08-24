@@ -342,6 +342,11 @@ Install-level settings (`session_prefix`, `tmux_socket`, the `[agents]`
 binary overrides) stay file-only: they are set once, and a wrong value
 is better caught by editing the file than by cycling a row.
 
+A row whose setting comes from an [environment variable](#configuration)
+is tagged `env` and is read-only — the footer names the variable — since
+anything written to `config.toml` would be overridden at the next launch
+anyway.
+
 ### Theme picker
 
 | Key | Action |
@@ -545,7 +550,22 @@ Environment overrides:
 | `BOSUN_SINGLE_WINDOW` | `single_window` (`1` / `true` to enable) |
 | `BOSUN_EMBED` | `embed_enabled` (`0` / `false` to disable) |
 | `BOSUN_SHOW_GROUP_IN_TITLE` | `show_group_in_title` (`1` / `true` / `yes` / `on` to enable) |
+| `BOSUN_DEFAULT_AGENT` | `default_agent` |
+| `BOSUN_REMOVE_DEAD_SESSIONS` | `remove_dead_sessions` (`0` / `false` / `off` / `no` to disable) |
 | `BOSUN_LOG` | Tracing filter, e.g. `BOSUN_LOG=info` |
+
+An environment variable wins over `config.toml`, which makes it a way
+to run bosun differently for one launch or one machine without editing
+(or having bosun rewrite) the file:
+
+```bash
+BOSUN_DEFAULT_AGENT=codex BOSUN_THEME=nord bosun
+```
+
+Any setting pinned this way is tagged `env` in the settings panel and
+can't be changed there — the panel would write to
+`config.toml` and the variable would just override it again on the next
+launch.
 
 ## How `Ctrl+Q` detach works
 
