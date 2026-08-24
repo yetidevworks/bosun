@@ -4,7 +4,7 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.11] — unreleased
+## [2.1.11] — 2026-08-24
 
 ### Fixed
 - **An exited session says so.** When a tmux session ends its sidebar
