@@ -69,6 +69,107 @@ struct GlobalsGuard {
     cq_installed: bool,
     cycle_installed: bool,
     quick_jump_installed: bool,
+    /// When the key-binding self-heal last ran. See [`SELF_HEAL_EVERY`].
+    last_self_heal: std::time::Instant,
+}
+
+/// How often `do_refresh` re-asserts the C-q / S-Left / S-Right / M-O
+/// bindings.
+///
+/// These used to be re-asserted on *every* refresh, which meant three
+/// blocking `tmux bind-key` execs a second for the whole life of the
+/// process — forever, on an idle server, just in case something
+/// clobbered the root key table. Nothing does that on a sub-minute
+/// cadence (it takes a `source-file` or another tool's hook), so a
+/// half-minute self-heal is just as safe and costs ~0.1 exec/s
+/// instead of 3.
+const SELF_HEAL_EVERY: Duration = Duration::from_secs(30);
+
+/// How long a session has to have been quiet before [`refresh_all`]
+/// stops re-capturing it and reuses the snapshot it already has.
+///
+/// tmux reports `session_activity` with one-second resolution, so a
+/// capture taken during second T can miss output that lands later in
+/// the same second without the timestamp moving. Requiring the
+/// recorded activity to be at least this old closes that race:
+/// anything that produced output recently is always re-captured, and
+/// only genuinely quiet sessions — the common case once a handful of
+/// agents are parked at a prompt — skip the exec.
+const CAPTURE_REUSE_AFTER: Duration = Duration::from_secs(2);
+
+/// Per-session state that outlives a single refresh pass.
+#[derive(Default)]
+struct RefreshState {
+    /// Status hysteresis, keyed by internal session name.
+    smoothers: HashMap<String, Smoother>,
+    /// The last `capture-pane` for each session, so a quiet session
+    /// doesn't cost a `tmux` exec on every 1Hz tick. See
+    /// [`CAPTURE_REUSE_AFTER`].
+    captures: HashMap<String, CachedCapture>,
+}
+
+impl RefreshState {
+    /// Drop per-session state for sessions that are no longer listed.
+    fn retain(&mut self, views: &[SessionView]) {
+        self.smoothers
+            .retain(|name, _| views.iter().any(|v| v.name() == name));
+        self.captures
+            .retain(|name, _| views.iter().any(|v| v.name() == name));
+    }
+}
+
+/// One session's cached `capture-pane`, plus everything we derive
+/// from it. Held behind `Arc`s so reusing it is a refcount bump, not
+/// a copy of the pane.
+struct CachedCapture {
+    /// tmux's `session_activity` at the moment of the capture.
+    activity: Option<SystemTime>,
+    /// The pane width the capture was taken at. A resize reflows the
+    /// pane without necessarily counting as activity, so the width
+    /// changing invalidates the snapshot on its own.
+    width: u16,
+    ansi: Arc<[u8]>,
+    plain: Arc<str>,
+    hash: u64,
+}
+
+impl CachedCapture {
+    fn new(activity: Option<SystemTime>, width: u16, ansi: Vec<u8>) -> Self {
+        let plain: Arc<str> = Arc::from(crate::tmux::detector::strip_ansi(&ansi));
+        // Fingerprint the visible text so the app can tell when a row
+        // has changed since the user last looked at it (the unread
+        // dot). Cheap, and rides the capture we already did — no extra
+        // tmux exec.
+        let hash = content_hash(&plain);
+        Self {
+            activity,
+            width,
+            ansi: Arc::from(ansi.into_boxed_slice()),
+            plain,
+            hash,
+        }
+    }
+
+    fn snapshot(&self) -> (Arc<[u8]>, Arc<str>, u64) {
+        (Arc::clone(&self.ansi), Arc::clone(&self.plain), self.hash)
+    }
+
+    /// Whether this snapshot can stand in for a fresh capture: the
+    /// session's activity timestamp hasn't moved since we took it,
+    /// and it's old enough that tmux's one-second resolution can't be
+    /// hiding newer output behind the same value.
+    fn still_valid(&self, activity: Option<SystemTime>, width: u16, now: SystemTime) -> bool {
+        if self.width != width {
+            return false;
+        }
+        match (self.activity, activity) {
+            (Some(prev), Some(cur)) if prev == cur => now
+                .duration_since(cur)
+                .map(|age| age >= CAPTURE_REUSE_AFTER)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
 }
 
 impl Drop for GlobalsGuard {
@@ -98,8 +199,13 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let registry = DetectorRegistry::default_stack();
-        let mut smoothers: HashMap<String, Smoother> = HashMap::new();
+        let mut refresh_state = RefreshState::default();
         let mut focused: Option<String> = None;
+        // Set by `Command::EmbedActive`: a live embed is already
+        // streaming the focused session's pane, so the fast preview
+        // tick has nothing left to contribute. See the fast branch
+        // in the select! below.
+        let mut embed_active = false;
         let mut last_bar_state: Vec<BarSession> = Vec::new();
         let mut globals = GlobalsGuard {
             socket: socket.clone(),
@@ -107,6 +213,7 @@ pub fn spawn(
             cq_installed: false,
             cycle_installed: false,
             quick_jump_installed: false,
+            last_self_heal: std::time::Instant::now(),
         };
 
         // Install the C-q detach binding up-front so it's live even
@@ -193,7 +300,7 @@ pub fn spawn(
             &*client,
             &config,
             &registry,
-            &mut smoothers,
+            &mut refresh_state,
             focused.as_deref(),
             socket.as_deref(),
             &mut last_bar_state,
@@ -213,13 +320,13 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                     )
                     .await;
                     match views {
                         Ok(views) => {
-                            smoothers.retain(|name, _| views.iter().any(|v| v.name() == name));
+                            refresh_state.retain(&views);
 
                             // Only sync the status bar when the set of
                             // (internal, display) tuples has actually
@@ -276,11 +383,14 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         &evt_tx,
                     )
                     .await;
+                }
+                Command::EmbedActive(active) => {
+                    embed_active = active;
                 }
                 Command::KillSession(internal) => {
                     match client.kill_session(&internal).await {
@@ -297,7 +407,7 @@ pub fn spawn(
                                 &*client,
                                 &config,
                                 &registry,
-                                &mut smoothers,
+                                &mut refresh_state,
                                 focused.as_deref(),
                                 socket.as_deref(),
                                 &mut last_bar_state,
@@ -337,7 +447,7 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         socket.as_deref(),
                         &mut last_bar_state,
@@ -370,7 +480,7 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         socket.as_deref(),
                         &mut last_bar_state,
@@ -493,7 +603,7 @@ pub fn spawn(
                                     &*client,
                                     &config,
                                     &registry,
-                                    &mut smoothers,
+                                    &mut refresh_state,
                                     focused.as_deref(),
                                     socket.as_deref(),
                                     &mut last_bar_state,
@@ -523,7 +633,7 @@ pub fn spawn(
                             &*client,
                             &config,
                             &registry,
-                            &mut smoothers,
+                            &mut refresh_state,
                             focused.as_deref(),
                             socket.as_deref(),
                             &mut last_bar_state,
@@ -569,7 +679,7 @@ pub fn spawn(
                                 &*client,
                                 &config,
                                 &registry,
-                                &mut smoothers,
+                                &mut refresh_state,
                                 focused.as_deref(),
                                 socket.as_deref(),
                                 &mut last_bar_state,
@@ -647,7 +757,7 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         socket.as_deref(),
                         &mut last_bar_state,
@@ -728,7 +838,7 @@ pub fn spawn(
                             &*client,
                             &config,
                             &registry,
-                            &mut smoothers,
+                            &mut refresh_state,
                             focused.as_deref(),
                             socket.as_deref(),
                             &mut last_bar_state,
@@ -748,7 +858,7 @@ pub fn spawn(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         socket.as_deref(),
                         &mut last_bar_state,
@@ -795,14 +905,27 @@ pub fn spawn(
                     // Nothing focused → nothing needs the tight
                     // cadence, so skip the tick outright and don't
                     // even pay the `list-sessions` exec.
-                    if focused.is_none() {
+                    //
+                    // Same for `embed_active`: when an embedded
+                    // terminal is relaying the focused session, its
+                    // vt100 grid is what `ui::preview` actually
+                    // draws — the bytes this tick captures are
+                    // thrown away, and the two `AppMsg`s it emits
+                    // (`StatusRefreshed` + `PreviewRefreshed`) each
+                    // cost a full-screen repaint in the app's run
+                    // loop. That was ~10 tmux execs and ~10 redundant
+                    // frames a second underneath a live embed
+                    // (issue #16). The 1Hz tick still refreshes the
+                    // focused session's status glyph like every
+                    // other session's.
+                    if focused.is_none() || embed_active {
                         continue;
                     }
                     refresh_focused(
                         &*client,
                         &config,
                         &registry,
-                        &mut smoothers,
+                        &mut refresh_state,
                         focused.as_deref(),
                         &evt_tx,
                     )
@@ -1375,7 +1498,7 @@ async fn refresh_focused(
     client: &dyn TmuxClient,
     config: &Config,
     registry: &DetectorRegistry,
-    smoothers: &mut HashMap<String, Smoother>,
+    refresh_state: &mut RefreshState,
     focused: Option<&str>,
     evt_tx: &mpsc::UnboundedSender<AppMsg>,
 ) {
@@ -1404,10 +1527,15 @@ async fn refresh_focused(
             return;
         }
     };
-    let plain = crate::tmux::detector::strip_ansi(&bytes);
-    let prev = smoothers.get(&s.name).map(|sm| sm.current());
+    // Park the capture in the shared cache too, so the next 1Hz
+    // `refresh_all` can reuse it if the session stays quiet.
+    let entry = CachedCapture::new(s.last_activity, s.pane_width, bytes);
+    let (ansi, plain, _) = entry.snapshot();
+    refresh_state.captures.insert(s.name.clone(), entry);
+
+    let prev = refresh_state.smoothers.get(&s.name).map(|sm| sm.current());
     let ctx = DetectContext::from_parts(
-        &bytes,
+        &ansi,
         &plain,
         s.last_activity,
         now,
@@ -1417,7 +1545,8 @@ async fn refresh_focused(
         s.pane_command.as_deref(),
     );
     let detected = registry.detect(&ctx);
-    let smoothed = smoothers
+    let smoothed = refresh_state
+        .smoothers
         .entry(s.name.clone())
         .or_default()
         .observe(detected);
@@ -1430,10 +1559,9 @@ async fn refresh_focused(
         name: s.name.clone(),
         status: publish,
     });
-    let arc: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
     let _ = evt_tx.send(AppMsg::PreviewRefreshed {
         name: s.name,
-        bytes: arc,
+        bytes: ansi,
     });
 }
 
@@ -1442,7 +1570,7 @@ async fn do_refresh(
     client: &dyn TmuxClient,
     config: &Config,
     registry: &DetectorRegistry,
-    smoothers: &mut HashMap<String, Smoother>,
+    refresh_state: &mut RefreshState,
     focused: Option<&str>,
     socket: Option<&str>,
     last_bar_state: &mut Vec<BarSession>,
@@ -1450,18 +1578,24 @@ async fn do_refresh(
     evt_tx: &mpsc::UnboundedSender<AppMsg>,
     select_after: Option<String>,
 ) -> crate::error::Result<()> {
-    // Re-assert the Ctrl-Q detach binding on every refresh. `bind-key`
-    // is idempotent, but running it once per tick means the binding
-    // self-heals if anything clobbers the root key table during a
-    // long-running session (source-file, another tool's hook, etc).
-    ensure_ctrl_q_bound(socket);
-    // Same self-heal for the S-Left / S-Right cycle bindings.
-    ensure_session_cycle_bound(socket);
-    // And for the M-O quick-jump popup binding.
-    ensure_quick_jump_bound(socket);
+    // Periodically re-assert the Ctrl-Q detach binding. `bind-key` is
+    // idempotent, and re-running it means the binding self-heals if
+    // anything clobbers the root key table during a long-running
+    // session (source-file, another tool's hook, etc). Rate-limited
+    // to `SELF_HEAL_EVERY` — these are blocking execs, and at one
+    // refresh a second they were three tmux processes a second for
+    // the entire life of the process.
+    if globals.last_self_heal.elapsed() >= SELF_HEAL_EVERY {
+        globals.last_self_heal = std::time::Instant::now();
+        ensure_ctrl_q_bound(socket);
+        // Same self-heal for the S-Left / S-Right cycle bindings.
+        ensure_session_cycle_bound(socket);
+        // And for the M-O quick-jump popup binding.
+        ensure_quick_jump_bound(socket);
+    }
 
-    let views = refresh_all(client, config, registry, smoothers, focused).await?;
-    smoothers.retain(|name, _| views.iter().any(|v| v.name() == name));
+    let views = refresh_all(client, config, registry, refresh_state, focused).await?;
+    refresh_state.retain(&views);
 
     let state: Vec<BarSession> = views
         .iter()
@@ -1533,7 +1667,7 @@ async fn refresh_all(
     client: &dyn TmuxClient,
     config: &Config,
     registry: &DetectorRegistry,
-    smoothers: &mut HashMap<String, Smoother>,
+    state: &mut RefreshState,
     focused: Option<&str>,
 ) -> crate::error::Result<Vec<SessionView>> {
     let raw = client.list_sessions().await?;
@@ -1551,16 +1685,35 @@ async fn refresh_all(
         // Capture the visible pane only (no scrollback) for both status
         // detection and preview rendering. Scrollback would pick up old
         // shell command history — not what the user expects to see.
-        let ansi = match client.capture_pane(&s.name).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("capture-pane {} failed: {}", s.name, e);
-                Vec::new()
+        //
+        // A session that hasn't been active since the last time we
+        // looked can't have changed, so reuse the previous snapshot
+        // instead of paying another `tmux` exec. See
+        // `CAPTURE_REUSE_AFTER` for why "quiet" needs a couple of
+        // seconds of slack.
+        let cached = state
+            .captures
+            .get(&s.name)
+            .filter(|c| c.still_valid(s.last_activity, s.pane_width, now));
+        let snap = match cached {
+            Some(c) => c.snapshot(),
+            None => {
+                let ansi = match client.capture_pane(&s.name).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("capture-pane {} failed: {}", s.name, e);
+                        Vec::new()
+                    }
+                };
+                let entry = CachedCapture::new(s.last_activity, s.pane_width, ansi);
+                let snap = entry.snapshot();
+                state.captures.insert(s.name.clone(), entry);
+                snap
             }
         };
+        let (ansi, plain, content_hash) = snap;
 
-        let plain = crate::tmux::detector::strip_ansi(&ansi);
-        let prev = smoothers.get(&s.name).map(|sm| sm.current());
+        let prev = state.smoothers.get(&s.name).map(|sm| sm.current());
         let ctx = DetectContext::from_parts(
             &ansi,
             &plain,
@@ -1572,7 +1725,8 @@ async fn refresh_all(
             s.pane_command.as_deref(),
         );
         let detected = registry.detect(&ctx);
-        let smoothed = smoothers
+        let smoothed = state
+            .smoothers
             .entry(s.name.clone())
             .or_default()
             .observe(detected);
@@ -1580,15 +1734,10 @@ async fn refresh_all(
         // Only hold onto the preview buffer for the focused session — the
         // others get None so we don't keep megabytes of pane history alive.
         let preview = if Some(s.name.as_str()) == focused {
-            Some(Arc::from(ansi.into_boxed_slice()))
+            Some(ansi)
         } else {
             None
         };
-        // Fingerprint the visible text so the app can tell when a row
-        // has changed since the user last looked at it (the unread
-        // dot). Cheap, and rides the capture we already did — no extra
-        // tmux exec.
-        let content_hash = content_hash(&plain);
         let mut view = SessionView::new(
             s,
             if smoothed == Status::Unknown {
@@ -2509,5 +2658,48 @@ mod worktree_tests {
             resolve_worktree_path("/srv/proj/", "feat", WorktreeLocation::Subdir),
             "/srv/proj/.worktrees/feat"
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_cache_tests {
+    use super::*;
+
+    /// A capture only stands in for a fresh one when the session has
+    /// been demonstrably quiet: same activity stamp, same pane width,
+    /// and the stamp old enough that tmux's one-second resolution
+    /// can't be hiding newer output behind it.
+    #[test]
+    fn cached_capture_reuse_needs_a_quiet_session() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let cap = CachedCapture::new(Some(at), 80, b"hello".to_vec());
+
+        // Quiet for longer than the grace period — reuse it.
+        assert!(cap.still_valid(Some(at), 80, at + Duration::from_secs(5)));
+        // Same second as the capture: more output could still land
+        // without moving the stamp, so re-capture.
+        assert!(!cap.still_valid(Some(at), 80, at + Duration::from_millis(500)));
+        // Activity moved — the pane wrote something.
+        assert!(!cap.still_valid(
+            Some(at + Duration::from_secs(1)),
+            80,
+            at + Duration::from_secs(5)
+        ));
+        // Same activity but the pane was resized, so it reflowed.
+        assert!(!cap.still_valid(Some(at), 120, at + Duration::from_secs(5)));
+        // No activity stamp at all (tmux didn't report one) — never reuse.
+        assert!(!cap.still_valid(None, 80, at + Duration::from_secs(5)));
+    }
+
+    /// The snapshot handed to callers is the derived text and hash,
+    /// not just the raw bytes — that's what lets a reused capture
+    /// skip `strip_ansi` and the content hash as well as the exec.
+    #[test]
+    fn cached_capture_snapshot_carries_derived_text() {
+        let cap = CachedCapture::new(None, 80, b"\x1b[31mred\x1b[0m text".to_vec());
+        let (ansi, plain, hash) = cap.snapshot();
+        assert_eq!(&*ansi, b"\x1b[31mred\x1b[0m text");
+        assert_eq!(&*plain, "red text");
+        assert_eq!(hash, content_hash("red text"));
     }
 }

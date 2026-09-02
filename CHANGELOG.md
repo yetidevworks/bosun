@@ -4,6 +4,48 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.12] — 2026-09-02
+
+### Fixed
+- **Idle CPU.** bosun burned CPU in proportion to how chatty the
+  selected session was, not to how much the screen actually changed —
+  ~20% of a core with a pane repainting continuously, ~2% just sitting
+  on a dozen quiet sessions. Four fixes, three of which are work that
+  never reached the screen in the first place:
+  - The fast preview tick (`preview_tick_ms`, 5 fps) kept capturing
+    the focused session's pane while the embedded terminal was
+    already streaming it. The renderer draws the embed's grid and
+    throws the captured bytes away, so that was two `tmux` execs and
+    two full repaints every tick for nothing. The tick now parks
+    while an embed is live; the 1Hz refresh still keeps the status
+    glyph current.
+  - The 1Hz refresh re-captured every managed session even when tmux
+    said the session hadn't been active since the last look. A quiet
+    session now reuses its last capture, so idle sessions cost a
+    single `list-sessions` between them instead of one `capture-pane`
+    each.
+  - The `C-q` / `S-Left` / `S-Right` / `M-O` key-binding self-heal ran
+    on every refresh — three blocking `tmux bind-key` execs a second,
+    forever. It now runs every 30s, which is just as safe.
+  - Repaints are paced. Every byte an embedded session writes is an
+    event and every event repainted, so a pane that scrolls
+    continuously drove the draw loop as fast as bosun could paint.
+    Repaints landing within a frame of each other now collapse into
+    one. This is a ceiling, not a schedule — an isolated change still
+    paints immediately — and at the default 60fps the most it can
+    ever add is ~16ms, less than one refresh of a 60Hz display.
+
+  Idle on 16 quiet sessions went from ~1.9% of a core to ~0.1%, and a
+  pane repainting flat out from ~20% to ~4%. Reported by
+  [@attilaolah](https://github.com/attilaolah) ([#16]).
+
+### Added
+- **`max_fps`** in `config.toml` (env: `BOSUN_MAX_FPS`), default 60.
+  Raise it if you want more frames for the CPU, or set `0` to turn
+  repaint pacing off entirely and go back to painting on every event.
+
+[#16]: https://github.com/yetidevworks/bosun/issues/16
+
 ## [2.1.11] — 2026-08-24
 
 ### Fixed
