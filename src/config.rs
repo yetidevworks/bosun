@@ -176,21 +176,21 @@ pub struct Config {
     /// `config.toml` or `BOSUN_PREVIEW_TICK_MS=300` in the env.
     pub preview_tick_ms: u64,
     /// Frame-rate cap for the UI's repaints, in frames per second.
-    /// `0` (the default) means uncapped: every event that changes the
-    /// screen repaints immediately, which is the lowest-latency
-    /// behavior and what bosun has always done.
+    /// Default 60. `0` means uncapped — every event that changes the
+    /// screen repaints the instant it lands, which is what bosun did
+    /// before 2.1.12.
     ///
-    /// Setting a cap trades a little latency for CPU. Every byte an
-    /// embedded session writes lands as an event, so a pane that
-    /// scrolls continuously — a build, an agent streaming a long
-    /// answer — drives the draw loop as fast as it can paint, and a
-    /// full repaint is not cheap (issue #16). With `max_fps = 30`
-    /// those repaints collapse into at most one frame every 33ms,
-    /// which cut a pathological case from ~17% of a core to ~3%.
-    /// Worth setting on a laptop or a machine where bosun sits open
-    /// all day; leave it off if you want the snappiest possible
-    /// keyboard feel. Set `max_fps = 30` in `config.toml` or
-    /// `BOSUN_MAX_FPS=30` in the env.
+    /// Every byte an embedded session writes is an event, so a pane
+    /// that scrolls continuously — a build, an agent streaming a long
+    /// answer — drove the draw loop as fast as bosun could paint, and
+    /// a full repaint is not cheap (issue #16). The cap doesn't slow
+    /// the steady state so much as collapse bursts: chunks arriving
+    /// within a frame of each other become one repaint instead of
+    /// five. At 60fps that costs at most ~16ms — less than one
+    /// refresh of a 60Hz display — and took a pathological case from
+    /// ~20% of a core to ~4%. Raise it if you want, or set `0` to
+    /// turn pacing off entirely. Set `max_fps = 0` in `config.toml`
+    /// or `BOSUN_MAX_FPS=0` in the env.
     pub max_fps: u32,
     /// Embedded-terminal preview (2.0+): when true, the focused
     /// session's preview pane is a real `vt100`-parsed embedded
@@ -272,9 +272,10 @@ impl Default for Config {
     }
 }
 
-/// Default frame-rate cap: `0`, meaning uncapped. See
-/// `Config::max_fps` for the trade-off.
-pub const DEFAULT_MAX_FPS: u32 = 0;
+/// Default frame-rate cap. 60fps bounds what a chatty pane can cost
+/// while staying under one refresh of a 60Hz display, so it reads as
+/// immediate. `0` disables pacing. See `Config::max_fps`.
+pub const DEFAULT_MAX_FPS: u32 = 60;
 
 /// Default fast preview tick in milliseconds. 200ms = 5 fps on the
 /// focused session's preview pane. See `Config::preview_tick_ms`.
@@ -442,8 +443,8 @@ impl Config {
             .or(file.preview_tick_ms)
             .unwrap_or(DEFAULT_PREVIEW_TICK_MS);
 
-        // Same precedence for the repaint cap. 0 (the default) means
-        // no cap at all — see `Config::max_fps`.
+        // Same precedence for the repaint cap. 0 means no cap at all
+        // — see `Config::max_fps`.
         let max_fps = env::var("BOSUN_MAX_FPS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())

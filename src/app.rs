@@ -2214,7 +2214,7 @@ pub struct App {
     /// still moving?" check in `sync_embed`.
     last_embed_spawn: Option<std::time::Instant>,
     /// Minimum wall time between repaints, derived from
-    /// `Config::max_fps`. `None` — the default — means no pacing:
+    /// `Config::max_fps`. `None` (`max_fps = 0`) means no pacing:
     /// every change repaints as soon as it lands.
     frame_interval: Option<std::time::Duration>,
     /// When the last frame was painted, and whether a repaint was
@@ -3567,13 +3567,14 @@ impl App {
     }
 
     /// The earliest instant the next frame may be painted, or `None`
-    /// when frame pacing is off (`max_fps = 0`, the default) or
-    /// nothing has been painted yet.
+    /// when frame pacing is off (`max_fps = 0`) or nothing has been
+    /// painted yet.
     ///
-    /// Off is the default deliberately: pacing trades keyboard
-    /// latency for CPU, and bosun's uncapped loop is what makes it
-    /// feel immediate. `Config::max_fps` explains when the trade is
-    /// worth making.
+    /// The interval is a ceiling on how often we repaint, not a
+    /// schedule: an isolated change still paints immediately. What it
+    /// buys is collapsing a burst of events — the usual case, since
+    /// every PTY chunk from an embedded session is one — into a
+    /// single frame. See `Config::max_fps`.
     fn frame_due_at(&self) -> Option<std::time::Instant> {
         let interval = self.frame_interval?;
         self.last_frame.map(|at| at + interval)

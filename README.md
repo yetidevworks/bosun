@@ -513,11 +513,11 @@ worktree_location = "subdir"     # where "create in worktree" puts new worktrees
 tmux_socket       = "bosun"      # dedicated tmux -L socket; "default" uses your shared socket
 divider_x        = 50           # saved automatically when you drag the list/preview divider
 preview_tick_ms  = 200          # fast-preview / live-status cadence; 0 disables the fast tick
-max_fps          = 0            # 0 (default) repaints as soon as anything changes. Set 30 or 60 to
-                                # pace repaints instead: a session that writes continuously (a build,
-                                # an agent streaming an answer) otherwise drives the draw loop as fast
-                                # as bosun can paint. Costs up to one frame of input latency and cuts
-                                # CPU several-fold on a chatty pane.
+max_fps          = 60           # ceiling on repaints per second; 0 turns pacing off entirely.
+                                # Every byte an embedded session writes is an event, so a pane that
+                                # scrolls continuously (a build, an agent streaming an answer) would
+                                # otherwise drive the draw loop as fast as bosun can paint. Bursts
+                                # collapse into one frame; costs at most ~16ms at 60fps.
 single_window    = true         # `s` key persists this; Enter focuses in-place instead of full-screen attach
 embed_enabled    = true         # set false to fall back to the polled-snapshot preview
 show_group_in_title = false      # prefix grouped sessions as "group/session" in tab pills and terminal title
@@ -552,7 +552,7 @@ Environment overrides:
 | `BOSUN_PREFIX` | `session_prefix` (empty string = show all sessions) |
 | `BOSUN_TMUX_SOCKET` | `tmux_socket` (empty or `default` = shared socket) |
 | `BOSUN_PREVIEW_TICK_MS` | `preview_tick_ms` |
-| `BOSUN_MAX_FPS` | `max_fps` (`0` = uncapped) |
+| `BOSUN_MAX_FPS` | `max_fps` (`0` = no repaint pacing) |
 | `BOSUN_SINGLE_WINDOW` | `single_window` (`1` / `true` to enable) |
 | `BOSUN_EMBED` | `embed_enabled` (`0` / `false` to disable) |
 | `BOSUN_SHOW_GROUP_IN_TITLE` | `show_group_in_title` (`1` / `true` / `yes` / `on` to enable) |
