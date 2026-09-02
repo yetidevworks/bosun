@@ -4,6 +4,44 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.12] — 2026-09-02
+
+### Fixed
+- **Idle CPU.** bosun burned CPU in proportion to how chatty the
+  selected session was, not to how much the screen actually changed —
+  ~20% of a core with a pane repainting continuously, ~2% just sitting
+  on a dozen quiet sessions. Three sources of work that never reached
+  the screen are gone:
+  - The fast preview tick (`preview_tick_ms`, 5 fps) kept capturing
+    the focused session's pane while the embedded terminal was
+    already streaming it. The renderer draws the embed's grid and
+    throws the captured bytes away, so that was two `tmux` execs and
+    two full repaints every tick for nothing. The tick now parks
+    while an embed is live; the 1Hz refresh still keeps the status
+    glyph current.
+  - The 1Hz refresh re-captured every managed session even when tmux
+    said the session hadn't been active since the last look. A quiet
+    session now reuses its last capture, so idle sessions cost a
+    single `list-sessions` between them instead of one `capture-pane`
+    each.
+  - The `C-q` / `S-Left` / `S-Right` / `M-O` key-binding self-heal ran
+    on every refresh — three blocking `tmux bind-key` execs a second,
+    forever. It now runs every 30s, which is just as safe.
+
+  Reported by [@attilaolah](https://github.com/attilaolah) ([#16]).
+
+### Added
+- **`max_fps`** in `config.toml` (env: `BOSUN_MAX_FPS`). Off by
+  default — bosun repaints as soon as anything changes, which is what
+  makes it feel immediate. Every byte an embedded session writes is an
+  event, though, so a pane that scrolls continuously drives the draw
+  loop as fast as bosun can paint. Set `max_fps = 60` and repaints
+  that land within a frame of each other collapse into one, for at
+  most ~16ms of added input latency; in a pathological test that took
+  bosun from ~20% of a core to ~4%.
+
+[#16]: https://github.com/yetidevworks/bosun/issues/16
+
 ## [2.1.11] — 2026-08-24
 
 ### Fixed

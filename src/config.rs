@@ -175,6 +175,23 @@ pub struct Config {
     /// full refresh). Override with `preview_tick_ms = 250` in
     /// `config.toml` or `BOSUN_PREVIEW_TICK_MS=300` in the env.
     pub preview_tick_ms: u64,
+    /// Frame-rate cap for the UI's repaints, in frames per second.
+    /// `0` (the default) means uncapped: every event that changes the
+    /// screen repaints immediately, which is the lowest-latency
+    /// behavior and what bosun has always done.
+    ///
+    /// Setting a cap trades a little latency for CPU. Every byte an
+    /// embedded session writes lands as an event, so a pane that
+    /// scrolls continuously — a build, an agent streaming a long
+    /// answer — drives the draw loop as fast as it can paint, and a
+    /// full repaint is not cheap (issue #16). With `max_fps = 30`
+    /// those repaints collapse into at most one frame every 33ms,
+    /// which cut a pathological case from ~17% of a core to ~3%.
+    /// Worth setting on a laptop or a machine where bosun sits open
+    /// all day; leave it off if you want the snappiest possible
+    /// keyboard feel. Set `max_fps = 30` in `config.toml` or
+    /// `BOSUN_MAX_FPS=30` in the env.
+    pub max_fps: u32,
     /// Embedded-terminal preview (2.0+): when true, the focused
     /// session's preview pane is a real `vt100`-parsed embedded
     /// terminal streaming from `tmux attach -r`, rather than a
@@ -238,6 +255,7 @@ impl Default for Config {
             banner_font: crate::ui::banner::default_name().to_string(),
             editor: None,
             preview_tick_ms: DEFAULT_PREVIEW_TICK_MS,
+            max_fps: DEFAULT_MAX_FPS,
             embed_enabled: DEFAULT_EMBED_ENABLED,
             // v2.0.2+: focused single-window mode is the only mode.
             // The field is retained as `true` for callers that still
@@ -253,6 +271,10 @@ impl Default for Config {
         }
     }
 }
+
+/// Default frame-rate cap: `0`, meaning uncapped. See
+/// `Config::max_fps` for the trade-off.
+pub const DEFAULT_MAX_FPS: u32 = 0;
 
 /// Default fast preview tick in milliseconds. 200ms = 5 fps on the
 /// focused session's preview pane. See `Config::preview_tick_ms`.
@@ -307,6 +329,9 @@ struct ConfigFile {
     /// Fast preview tick in milliseconds. See `Config::preview_tick_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview_tick_ms: Option<u64>,
+    /// Repaint frame-rate cap. See `Config::max_fps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_fps: Option<u32>,
     /// Embedded-terminal preview opt-out. See `Config::embed_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     embed: Option<bool>,
@@ -417,6 +442,14 @@ impl Config {
             .or(file.preview_tick_ms)
             .unwrap_or(DEFAULT_PREVIEW_TICK_MS);
 
+        // Same precedence for the repaint cap. 0 (the default) means
+        // no cap at all — see `Config::max_fps`.
+        let max_fps = env::var("BOSUN_MAX_FPS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .or(file.max_fps)
+            .unwrap_or(DEFAULT_MAX_FPS);
+
         // Embed opt-out: accept `0`, `false`, `off`, `no` (case-
         // insensitive) as disable; anything else as enable. Mirrors
         // the conventional shell-flag idiom. Env beats file beats
@@ -491,6 +524,7 @@ impl Config {
             banner_font,
             editor,
             preview_tick_ms,
+            max_fps,
             embed_enabled,
             single_window_mode,
             sidebar_hidden,
@@ -898,6 +932,7 @@ mod tests {
             banner_font: crate::ui::banner::default_name().to_string(),
             editor: None,
             preview_tick_ms: DEFAULT_PREVIEW_TICK_MS,
+            max_fps: DEFAULT_MAX_FPS,
             embed_enabled: DEFAULT_EMBED_ENABLED,
             single_window_mode: false,
             sidebar_hidden: false,
@@ -945,6 +980,7 @@ mod tests {
             banner_font: crate::ui::banner::default_name().to_string(),
             editor: None,
             preview_tick_ms: DEFAULT_PREVIEW_TICK_MS,
+            max_fps: DEFAULT_MAX_FPS,
             embed_enabled: DEFAULT_EMBED_ENABLED,
             single_window_mode: false,
             sidebar_hidden: false,

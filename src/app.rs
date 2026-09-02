@@ -2213,6 +2213,19 @@ pub struct App {
     /// When the last embed was spawned. Drives the "is the user
     /// still moving?" check in `sync_embed`.
     last_embed_spawn: Option<std::time::Instant>,
+    /// Minimum wall time between repaints, derived from
+    /// `Config::max_fps`. `None` — the default — means no pacing:
+    /// every change repaints as soon as it lands.
+    frame_interval: Option<std::time::Duration>,
+    /// When the last frame was painted, and whether a repaint was
+    /// asked for and deferred because it arrived inside the frame
+    /// interval. See `draw_throttled`.
+    last_frame: Option<std::time::Instant>,
+    frame_pending: bool,
+    /// Last value sent to the tmux actor as `Command::EmbedActive`.
+    /// Tracked so we only send on a real transition rather than once
+    /// per event. See `sync_preview_source`.
+    embed_active_sent: bool,
     /// Sessions whose `window-size` option has been reset to
     /// `latest` this run. The reset exists to repair sessions a
     /// pre-2.0 bosun pinned to `manual`; it's idempotent, so one
@@ -2340,6 +2353,13 @@ impl App {
             embed_focused: false,
             embed_switch: None,
             last_embed_spawn: None,
+            frame_interval: match config.max_fps {
+                0 => None,
+                fps => Some(std::time::Duration::from_secs(1) / fps),
+            },
+            last_frame: None,
+            frame_pending: false,
+            embed_active_sent: false,
             window_size_reset: std::collections::HashSet::new(),
             restore_focus_after_modal: false,
             kbd_enhanced: false,
@@ -2368,28 +2388,53 @@ impl App {
             self.state.term_size = (size.width, size.height);
         }
 
-        terminal
-            .draw(|f| {
-                ui::draw(
-                    f,
-                    &self.state,
-                    &self.theme,
-                    self.embed.as_ref(),
-                    self.embed_focused,
-                )
-            })
-            .map_err(term_err)?;
+        self.draw_frame(terminal)?;
 
         while !self.state.quit {
-            // While an embed spawn is parked on the settle timer, wake
-            // up at its deadline even if no event arrives — otherwise
-            // a session the user stopped on would never get its
-            // embed until the next tick or keypress.
-            let msg = match self.embed_switch.as_ref().map(|p| p.due) {
+            // Flush a repaint that `draw_throttled` deferred, now
+            // that its frame interval is up. Doing it here (rather
+            // than only on the wake-up timer below) matters while a
+            // pane is flooding: events keep arriving before the
+            // deadline, so the timer never fires and the deferred
+            // frame would otherwise never be painted.
+            if self.frame_pending
+                && self
+                    .frame_due_at()
+                    .is_some_and(|due| due <= std::time::Instant::now())
+            {
+                self.draw_frame(terminal)?;
+            }
+
+            // Two things can want us awake with no event pending:
+            // an embed spawn parked on the settle timer (otherwise a
+            // session the user stopped on would never get its embed
+            // until the next tick or keypress), and a deferred
+            // frame. Wait until whichever is sooner.
+            let embed_due = self.embed_switch.as_ref().map(|p| p.due);
+            let frame_due = if self.frame_pending {
+                self.frame_due_at()
+            } else {
+                None
+            };
+            let deadline = match (embed_due, frame_due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let msg = match deadline {
                 Some(due) => match tokio::time::timeout_at(due.into(), self.evt_rx.recv()).await {
                     Ok(Some(m)) => m,
                     Ok(None) => break,
-                    Err(_) => AppMsg::EmbedSettle,
+                    Err(_) => {
+                        // Only the embed settle deadline produces an
+                        // event. If it was the frame deadline that
+                        // came due, loop round — the flush at the top
+                        // paints it.
+                        if embed_due.is_some_and(|due| due <= std::time::Instant::now()) {
+                            AppMsg::EmbedSettle
+                        } else {
+                            continue;
+                        }
+                    }
                 },
                 None => match self.evt_rx.recv().await {
                     Some(m) => m,
@@ -2425,17 +2470,7 @@ impl App {
                 }
                 self.has_focus = true;
                 self.recover_display(terminal);
-                terminal
-                    .draw(|f| {
-                        ui::draw(
-                            f,
-                            &self.state,
-                            &self.theme,
-                            self.embed.as_ref(),
-                            self.embed_focused,
-                        )
-                    })
-                    .map_err(term_err)?;
+                self.draw_frame(terminal)?;
                 continue;
             }
 
@@ -2574,17 +2609,7 @@ impl App {
                             }
                         }
                         let _ = terminal.clear();
-                        terminal
-                            .draw(|f| {
-                                ui::draw(
-                                    f,
-                                    &self.state,
-                                    &self.theme,
-                                    self.embed.as_ref(),
-                                    self.embed_focused,
-                                )
-                            })
-                            .map_err(term_err)?;
+                        self.draw_frame(terminal)?;
                         continue;
                     } else if is_shift_left || is_shift_right {
                         // Tab cycle within the current container.
@@ -2659,17 +2684,7 @@ impl App {
                     if self.state.force_redraw {
                         self.recover_display(terminal);
                         self.state.force_redraw = false;
-                        terminal
-                            .draw(|f| {
-                                ui::draw(
-                                    f,
-                                    &self.state,
-                                    &self.theme,
-                                    self.embed.as_ref(),
-                                    self.embed_focused,
-                                )
-                            })
-                            .map_err(term_err)?;
+                        self.draw_frame(terminal)?;
                     }
                     // Don't draw here — the next EmbedBytes chunk
                     // from the agent's echo / response will trigger
@@ -2838,17 +2853,7 @@ impl App {
                         internal, spec, recents,
                     ),
                 ));
-                terminal
-                    .draw(|f| {
-                        ui::draw(
-                            f,
-                            &self.state,
-                            &self.theme,
-                            self.embed.as_ref(),
-                            self.embed_focused,
-                        )
-                    })
-                    .map_err(term_err)?;
+                self.draw_frame(terminal)?;
                 continue;
             }
 
@@ -2885,17 +2890,7 @@ impl App {
                 // launch (issue #2): fire it now that the attach is
                 // confirmed, not merely because `spawn` returned.
                 self.fire_ready_pending_launch();
-                terminal
-                    .draw(|f| {
-                        ui::draw(
-                            f,
-                            &self.state,
-                            &self.theme,
-                            self.embed.as_ref(),
-                            self.embed_focused,
-                        )
-                    })
-                    .map_err(term_err)?;
+                self.draw_throttled(terminal)?;
                 continue;
             }
 
@@ -3209,17 +3204,7 @@ impl App {
                         .unwrap_or(false);
                 if want_single_window {
                     self.enter_focus().await;
-                    terminal
-                        .draw(|f| {
-                            ui::draw(
-                                f,
-                                &self.state,
-                                &self.theme,
-                                self.embed.as_ref(),
-                                self.embed_focused,
-                            )
-                        })
-                        .map_err(term_err)?;
+                    self.draw_frame(terminal)?;
                     continue;
                 }
 
@@ -3311,6 +3296,7 @@ impl App {
             // because spawn now primes the parser with a
             // synchronous capture-pane snapshot.
             self.sync_embed().await;
+            self.sync_preview_source();
 
             // Deferred agent launch (issue #2): fire once the embed for
             // the pending session has actually attached (or the wait
@@ -3331,17 +3317,7 @@ impl App {
                 self.state.force_redraw = false;
             }
 
-            terminal
-                .draw(|f| {
-                    ui::draw(
-                        f,
-                        &self.state,
-                        &self.theme,
-                        self.embed.as_ref(),
-                        self.embed_focused,
-                    )
-                })
-                .map_err(term_err)?;
+            self.draw_throttled(terminal)?;
         }
 
         // Shut down the input actor cleanly before returning. Its
@@ -3542,6 +3518,86 @@ impl App {
                 internal,
                 resume: pending.resume,
             });
+        }
+    }
+
+    /// Paint a frame now, unconditionally, and reset the pacing
+    /// window. Use for one-off repaints the user is waiting on — a
+    /// modal opening, a display recovery, entering focus.
+    fn draw_frame<B: ratatui::backend::Backend + std::io::Write>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<()> {
+        self.last_frame = Some(std::time::Instant::now());
+        self.frame_pending = false;
+        terminal
+            .draw(|f| {
+                ui::draw(
+                    f,
+                    &self.state,
+                    &self.theme,
+                    self.embed.as_ref(),
+                    self.embed_focused,
+                )
+            })
+            .map_err(term_err)?;
+        Ok(())
+    }
+
+    /// Paint a frame, unless one was painted less than a frame
+    /// interval ago — in which case remember that the screen is
+    /// stale and let the run loop flush it when the interval is up.
+    ///
+    /// This is what keeps a chatty pane from driving the draw loop:
+    /// the repaint still happens, just at most one frame interval
+    /// after the change, and every event that lands in between
+    /// collapses into the same frame. A no-op when pacing is off.
+    fn draw_throttled<B: ratatui::backend::Backend + std::io::Write>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<()> {
+        if self
+            .frame_due_at()
+            .is_some_and(|due| std::time::Instant::now() < due)
+        {
+            self.frame_pending = true;
+            return Ok(());
+        }
+        self.draw_frame(terminal)
+    }
+
+    /// The earliest instant the next frame may be painted, or `None`
+    /// when frame pacing is off (`max_fps = 0`, the default) or
+    /// nothing has been painted yet.
+    ///
+    /// Off is the default deliberately: pacing trades keyboard
+    /// latency for CPU, and bosun's uncapped loop is what makes it
+    /// feel immediate. `Config::max_fps` explains when the trade is
+    /// worth making.
+    fn frame_due_at(&self) -> Option<std::time::Instant> {
+        let interval = self.frame_interval?;
+        self.last_frame.map(|at| at + interval)
+    }
+
+    /// Tell the tmux actor whether a live embed is already relaying
+    /// the focused session's pane.
+    ///
+    /// When one is, `ui::preview::render` draws the embed's vt100
+    /// grid and never looks at the polled snapshot — so the actor's
+    /// fast preview tick spends two `tmux` execs and pushes two
+    /// `AppMsg`s (each costing a full repaint here) every
+    /// `preview_tick_ms` to produce bytes nothing reads. Issue #16:
+    /// that was most of bosun's idle CPU with a session selected.
+    /// The actor parks the fast tick while this is true; the 1Hz
+    /// refresh still keeps every session's status glyph current.
+    fn sync_preview_source(&mut self) {
+        let embedded = match (self.embed.as_ref(), self.state.selected_session_name()) {
+            (Some(embed), Some(name)) => embed.session() == name,
+            _ => false,
+        };
+        if self.embed_active_sent != embedded {
+            self.embed_active_sent = embedded;
+            let _ = self.cmd_tx.send(Command::EmbedActive(embedded));
         }
     }
 

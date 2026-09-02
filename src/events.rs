@@ -167,6 +167,14 @@ pub enum Command {
     /// its pane with priority so the preview updates quickly. The name
     /// is owned so the command can cross the mpsc boundary.
     FocusPreview { name: String },
+    /// Whether a live embedded terminal is currently relaying the
+    /// focused session's pane. When it is, the fast preview tick's
+    /// `capture-pane` output is thrown away by the renderer (the
+    /// embed's vt100 grid wins in `ui::preview::render`), so the
+    /// actor parks that tick instead of paying two `tmux` execs and
+    /// two redraws every `preview_tick_ms`. The app sends this
+    /// whenever the answer changes.
+    EmbedActive(bool),
     /// Create a new tmux session from the new-session modal's form data.
     CreateSession(SessionSpec),
     /// Kill a session by its internal tmux name. `tmux kill-session -t`.
