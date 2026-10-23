@@ -149,9 +149,13 @@ pub struct EmbedTerminal {
     /// detect the real light/dark background through bosun's tmux
     /// layer instead of timing out and assuming dark (issue #2).
     default_colors: crate::terminal_query::DefaultColors,
-    /// Incremental scanner that spots those queries in the inner byte
-    /// stream, carrying an incomplete trailing sequence between reads.
-    color_query_scanner: crate::terminal_query::QueryScanner,
+    /// Incremental scanner that spots those queries, and tmux's own
+    /// device and size queries, in the inner byte stream, carrying an
+    /// incomplete trailing sequence between reads (issues #2, #22).
+    query_scanner: crate::terminal_query::QueryScanner,
+    /// One cell's `(width, height)` in pixels, from the outer
+    /// terminal. Gives the PTY a pixel size so tmux doesn't query it.
+    cell: (u16, u16),
     /// Flips true the first time the reader thread delivers PTY bytes
     /// via `feed` — proof the `tmux attach -r` client actually
     /// connected and tmux is relaying the pane (the initial repaint).
@@ -193,14 +197,14 @@ impl EmbedTerminal {
         let rows = rows.max(MIN_ROWS);
         let cols = cols.max(MIN_COLS);
 
+        // A PTY with no pixel size makes tmux 3.6+ ask the terminal for
+        // one, and it holds every lone Esc for 500 ms until it gets an
+        // answer (issue #22). The scanner answers too; this avoids the
+        // query altogether.
+        let cell = crate::terminal_query::cell_pixels();
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .openpty(pty_size(rows, cols, cell))
             .map_err(io_err("openpty"))?;
 
         let mut cmd = CommandBuilder::new("tmux");
@@ -296,7 +300,8 @@ impl EmbedTerminal {
             cols,
             mode,
             default_colors,
-            color_query_scanner: crate::terminal_query::QueryScanner::default(),
+            query_scanner: crate::terminal_query::QueryScanner::default(),
+            cell,
             attach_confirmed: false,
         })
     }
@@ -360,27 +365,35 @@ impl EmbedTerminal {
     /// (which tmux relays down to us as its client terminal) and
     /// answers each with the outer terminal's real fg/bg/cursor. vt100
     /// ignores the queries, so the inner app would otherwise time out
-    /// and assume a dark background (issue #2). The query bytes still
-    /// flow into the parser too — harmless, vt100 drops them.
+    /// and assume a dark background (issue #2). tmux's own device and
+    /// size queries get answered the same way: while one is pending,
+    /// tmux delays every lone Esc by 500 ms (issue #22). The query
+    /// bytes still flow into the parser too — harmless, vt100 drops
+    /// them.
     pub fn feed(&mut self, bytes: &[u8]) {
         // First real byte from the reader = the attach is live and
         // relaying, so the OSC responder below can be reached.
         if !bytes.is_empty() {
             self.attach_confirmed = true;
         }
-        for (kind, term) in self.color_query_scanner.scan(bytes) {
-            let reply = self.default_colors.response(kind, term);
+        let area = crate::terminal_query::TextArea {
+            rows: self.rows,
+            cols: self.cols,
+            cell: self.cell,
+        };
+        for query in self.query_scanner.scan(bytes) {
+            let reply = crate::terminal_query::answer(query, &self.default_colors, area);
             if let Err(e) = self.write_raw(&reply) {
-                tracing::warn!("embed color-query reply failed: {}", e);
+                tracing::warn!("embed query reply failed: {}", e);
             }
         }
         self.parser.process(bytes);
     }
 
     /// Write bytes straight to the PTY master regardless of attach
-    /// mode. `write` is gated on `Focused`, but OSC color replies must
-    /// go back even in `Preview` mode — tmux relays the query to us as
-    /// its client and expects the answer on the same channel.
+    /// mode. `write` is gated on `Focused`, but query replies must go
+    /// back even in `Preview` mode — tmux sends the query to us as its
+    /// client and expects the answer on the same channel.
     fn write_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         if let Some(w) = self.writer.as_mut() {
             w.write_all(bytes)?;
@@ -404,12 +417,7 @@ impl EmbedTerminal {
         self.cols = cols;
         self.parser.screen_mut().set_size(rows, cols);
         if let Some(master) = self.master.as_ref() {
-            let _ = master.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
+            let _ = master.resize(pty_size(rows, cols, self.cell));
         }
         // The session's window will track our new size through
         // tmux's normal negotiation (window-size=latest by default
@@ -512,6 +520,16 @@ impl Drop for EmbedTerminal {
                 drop(writer);
                 drop(master);
             });
+    }
+}
+
+/// The PTY size for a `rows` × `cols` grid of `cell`-sized cells.
+fn pty_size(rows: u16, cols: u16, cell: (u16, u16)) -> PtySize {
+    PtySize {
+        rows,
+        cols,
+        pixel_width: cols.saturating_mul(cell.0),
+        pixel_height: rows.saturating_mul(cell.1),
     }
 }
 

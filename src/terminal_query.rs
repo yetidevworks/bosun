@@ -15,6 +15,15 @@
 //! answers whenever it spots a query in the inner byte stream (see
 //! [`QueryScanner`]). If the real terminal doesn't answer, callers
 //! fall back to the active theme's colors.
+//!
+//! The same scanner also answers the queries tmux itself sends its
+//! client terminal: device attributes (DA1, DA2, XTVERSION), the
+//! synchronized-output mode (DECRQM 2026) and the text-area size
+//! (`CSI 18 t` / `CSI 14 t`). While any of those is unanswered tmux
+//! holds a lone Esc for 500 ms whatever `escape-time` says, and tmux
+//! 3.6–3.8 never give up on the size query, so without answers every
+//! Esc followed by a key within half a second arrived as Meta+key
+//! (issue #22).
 
 /// A 48-bit RGB color — 16 bits per channel, the precision OSC color
 /// responses use (`rgb:RRRR/GGGG/BBBB`).
@@ -244,24 +253,160 @@ pub fn parse_responses(buf: &[u8], out: &mut TermColors) {
     }
 }
 
-/// Incremental scanner for OSC 10/11/12 *queries* in the embed byte
-/// stream. Carries an incomplete trailing sequence between calls so a
-/// query split across PTY read chunks is still recognized. Returns the
-/// `(kind, terminator)` of every complete query found in this chunk.
+/// A query spotted in the embed byte stream that the embed answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query {
+    /// OSC 10/11/12 `?` — default fg/bg/cursor color.
+    Color(ColorKind, Terminator),
+    /// `CSI c` — primary device attributes (DA1).
+    PrimaryDa,
+    /// `CSI > c` — secondary device attributes (DA2).
+    SecondaryDa,
+    /// `CSI > q` — terminal name and version (XTVERSION).
+    XtVersion,
+    /// `CSI ? 2026 $ p` — is synchronized output supported (DECRQM).
+    SyncMode,
+    /// `CSI 18 t` — text area size in cells.
+    TextAreaCells,
+    /// `CSI 14 t` — text area size in pixels.
+    TextAreaPixels,
+}
+
+/// The embed's size, for answering the text-area queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextArea {
+    pub rows: u16,
+    pub cols: u16,
+    /// One cell's width and height in pixels.
+    pub cell: (u16, u16),
+}
+
+impl TextArea {
+    /// The whole area in pixels as `(width, height)`.
+    pub fn pixels(&self) -> (u16, u16) {
+        (
+            self.cols.saturating_mul(self.cell.0),
+            self.rows.saturating_mul(self.cell.1),
+        )
+    }
+}
+
+/// The reply bytes for `query`. The device answers describe a plain
+/// VT220 with color and nothing else (no sixel, no synchronized
+/// output) so tmux never turns on a feature the vt100 parser can't
+/// handle; the XTVERSION name is one tmux has no feature set for.
+pub fn answer(query: Query, colors: &DefaultColors, area: TextArea) -> Vec<u8> {
+    match query {
+        Query::Color(kind, term) => colors.response(kind, term),
+        Query::PrimaryDa => b"\x1b[?62;22c".to_vec(),
+        Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
+        Query::XtVersion => {
+            format!("\x1bP>|bosun {}\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes()
+        }
+        Query::SyncMode => b"\x1b[?2026;0$y".to_vec(),
+        Query::TextAreaCells => format!("\x1b[8;{};{}t", area.rows, area.cols).into_bytes(),
+        Query::TextAreaPixels => {
+            let (w, h) = area.pixels();
+            format!("\x1b[4;{h};{w}t").into_bytes()
+        }
+    }
+}
+
+/// Cell size in pixels used when the outer terminal doesn't report
+/// its pixel size.
+const FALLBACK_CELL: (u16, u16) = (8, 16);
+
+/// One cell's `(width, height)` in pixels on the outer terminal,
+/// falling back to 8×16 when it doesn't report a pixel size. Giving
+/// the embed PTY a pixel size stops tmux sending the text-area size
+/// query in the first place.
+pub fn cell_pixels() -> (u16, u16) {
+    match crossterm::terminal::window_size() {
+        Ok(ws) if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 => {
+            ((ws.width / ws.columns).max(1), (ws.height / ws.rows).max(1))
+        }
+        _ => FALLBACK_CELL,
+    }
+}
+
+/// How a sequence starting at an `ESC` turned out.
+enum Parsed {
+    /// A complete sequence `len` bytes long, and the query it is, if
+    /// it's one we answer.
+    Complete(Option<Query>, usize),
+    /// The buffer ends before the sequence does.
+    Incomplete,
+    /// Not a sequence the scanner tracks.
+    Other,
+}
+
+/// Parse the sequence at `s[0] == ESC`.
+fn parse_at(s: &[u8]) -> Parsed {
+    match s.get(1) {
+        None => Parsed::Incomplete,
+        Some(b']') => match parse_one(s) {
+            Some(seq) => {
+                let query = (seq.spec == b"?").then_some(Query::Color(seq.kind, seq.term));
+                Parsed::Complete(query, seq.end)
+            }
+            // No BEL and no further ESC: the terminator hasn't
+            // arrived yet.
+            None if !s[2..].iter().any(|&b| b == 0x07 || b == 0x1b) => Parsed::Incomplete,
+            None => Parsed::Other,
+        },
+        Some(b'[') => parse_csi(s),
+        Some(_) => Parsed::Other,
+    }
+}
+
+/// Parse a CSI sequence at `s[0..2] == ESC [`: parameter bytes, then
+/// intermediate bytes, then one final byte.
+fn parse_csi(s: &[u8]) -> Parsed {
+    let mut p = 2;
+    while p < s.len() && (0x30..=0x3f).contains(&s[p]) {
+        p += 1;
+    }
+    let params = &s[2..p];
+    while p < s.len() && (0x20..=0x2f).contains(&s[p]) {
+        p += 1;
+    }
+    let inter = &s[2 + params.len()..p];
+    let Some(&fin) = s.get(p) else {
+        return Parsed::Incomplete;
+    };
+    if !(0x40..=0x7e).contains(&fin) {
+        return Parsed::Other;
+    }
+    let query = match (params, inter, fin) {
+        (b"" | b"0", b"", b'c') => Some(Query::PrimaryDa),
+        (b">" | b">0", b"", b'c') => Some(Query::SecondaryDa),
+        (b">" | b">0", b"", b'q') => Some(Query::XtVersion),
+        (b"?2026", b"$", b'p') => Some(Query::SyncMode),
+        (b"18", b"", b't') => Some(Query::TextAreaCells),
+        (b"14", b"", b't') => Some(Query::TextAreaPixels),
+        _ => None,
+    };
+    Parsed::Complete(query, p + 1)
+}
+
+/// Incremental scanner for the queries the embed answers (see
+/// [`Query`]) in the embed byte stream. Carries an incomplete trailing
+/// sequence between calls so a query split across PTY read chunks is
+/// still recognized. Returns every complete query found in this chunk.
 #[derive(Debug, Default)]
 pub struct QueryScanner {
     carry: Vec<u8>,
 }
 
-/// Max bytes we'll hold waiting for a query to complete. A real
-/// `ESC ] 11 ; ? ST` is ~8 bytes; anything longer without a
-/// terminator isn't a color query, so we don't let the carry grow.
+/// Max bytes we'll hold waiting for a query to complete. The longest
+/// query, `ESC ] 11 ; ? ST`, is ~8 bytes; anything longer without an
+/// end isn't one of ours, so we don't let the carry grow.
 const CARRY_CAP: usize = 64;
 
 impl QueryScanner {
     /// Feed the next chunk of inner PTY output; returns any complete
-    /// color queries it contained.
-    pub fn scan(&mut self, chunk: &[u8]) -> Vec<(ColorKind, Terminator)> {
+    /// queries it contained.
+    pub fn scan(&mut self, chunk: &[u8]) -> Vec<Query> {
         // Cheap exit: no ESC anywhere and nothing pending → nothing to do.
         if self.carry.is_empty() && !chunk.contains(&0x1b) {
             return Vec::new();
@@ -269,26 +414,24 @@ impl QueryScanner {
         let mut buf = std::mem::take(&mut self.carry);
         buf.extend_from_slice(chunk);
 
-        let seqs = find_osc_colors(&buf);
         let mut out = Vec::new();
-        let mut consumed = 0;
-        for seq in &seqs {
-            if seq.spec == b"?" {
-                out.push((seq.kind, seq.term));
+        let mut i = 0;
+        while let Some(off) = buf[i..].iter().position(|&b| b == 0x1b) {
+            let start = i + off;
+            match parse_at(&buf[start..]) {
+                Parsed::Complete(query, len) => {
+                    out.extend(query);
+                    i = start + len;
+                }
+                Parsed::Incomplete => {
+                    // Hold the unfinished sequence for the next call.
+                    if buf.len() - start <= CARRY_CAP {
+                        self.carry = buf[start..].to_vec();
+                    }
+                    break;
+                }
+                Parsed::Other => i = start + 1,
             }
-            consumed = seq.end;
-        }
-
-        // Keep a bounded tail: the bytes after the last complete
-        // sequence, trimmed to the last `ESC` so a split query can
-        // finish on the next call. Drop everything if no `ESC` remains.
-        let tail = &buf[consumed..];
-        self.carry = match tail.iter().rposition(|&b| b == 0x1b) {
-            Some(pos) => tail[pos..].to_vec(),
-            None => Vec::new(),
-        };
-        if self.carry.len() > CARRY_CAP {
-            self.carry.clear();
         }
         out
     }
@@ -418,9 +561,9 @@ mod tests {
     fn scanner_finds_query_with_bel_and_st() {
         let mut s = QueryScanner::default();
         let found = s.scan(b"\x1b]11;?\x07");
-        assert_eq!(found, vec![(ColorKind::Bg, Terminator::Bel)]);
+        assert_eq!(found, vec![Query::Color(ColorKind::Bg, Terminator::Bel)]);
         let found = s.scan(b"\x1b]10;?\x1b\\");
-        assert_eq!(found, vec![(ColorKind::Fg, Terminator::St)]);
+        assert_eq!(found, vec![Query::Color(ColorKind::Fg, Terminator::St)]);
     }
 
     #[test]
@@ -428,7 +571,7 @@ mod tests {
         let mut s = QueryScanner::default();
         assert!(s.scan(b"data\x1b]11").is_empty());
         let found = s.scan(b";?\x07more");
-        assert_eq!(found, vec![(ColorKind::Bg, Terminator::Bel)]);
+        assert_eq!(found, vec![Query::Color(ColorKind::Bg, Terminator::Bel)]);
     }
 
     #[test]
@@ -457,5 +600,85 @@ mod tests {
         junk.extend(std::iter::repeat(b'x').take(1000));
         s.scan(&junk);
         assert!(s.carry.len() <= CARRY_CAP);
+    }
+
+    #[test]
+    fn scanner_finds_tmux_startup_queries() {
+        // What tmux 3.8 writes to a fresh client, interleaved with the
+        // redraw it sends around them.
+        let mut s = QueryScanner::default();
+        let found = s.scan(
+            b"\x1b[?1049h\x1b[H\x1b[2J\x1b[c\x1b[>c\x1b[>q\x1b[?2026$p\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[18t\x1b[14t\x1b[1;31mhi",
+        );
+        assert_eq!(
+            found,
+            vec![
+                Query::PrimaryDa,
+                Query::SecondaryDa,
+                Query::XtVersion,
+                Query::SyncMode,
+                Query::Color(ColorKind::Fg, Terminator::St),
+                Query::Color(ColorKind::Bg, Terminator::St),
+                Query::TextAreaCells,
+                Query::TextAreaPixels,
+            ]
+        );
+        assert!(s.carry.is_empty());
+    }
+
+    #[test]
+    fn scanner_ignores_other_csi() {
+        let mut s = QueryScanner::default();
+        // Cursor moves, SGR, mode sets, other window ops, DECRQM for
+        // another mode, and a DA *response* (`?` params) are not queries.
+        assert!(s
+            .scan(b"\x1b[2;5H\x1b[0m\x1b[?25l\x1b[?2031h\x1b[22;0t\x1b[?1049$p\x1b[?62;22c\x1b[1c")
+            .is_empty());
+    }
+
+    #[test]
+    fn scanner_handles_csi_split_across_chunks() {
+        let mut s = QueryScanner::default();
+        assert!(s.scan(b"text\x1b").is_empty());
+        assert_eq!(s.scan(b"[>").len(), 0);
+        assert_eq!(s.scan(b"c\x1b[1"), vec![Query::SecondaryDa]);
+        assert_eq!(s.scan(b"8tmore"), vec![Query::TextAreaCells]);
+        assert!(s.carry.is_empty());
+    }
+
+    #[test]
+    fn scanner_never_reports_a_query_twice() {
+        let mut s = QueryScanner::default();
+        assert_eq!(s.scan(b"\x1b[c\x1b["), vec![Query::PrimaryDa]);
+        assert_eq!(s.scan(b"18t"), vec![Query::TextAreaCells]);
+        assert!(s.scan(b"plain").is_empty());
+    }
+
+    #[test]
+    fn answers_are_what_tmux_expects() {
+        let colors = DefaultColors {
+            fg: (0, 0, 0),
+            bg: (0xffff, 0xffff, 0xffff),
+            cursor: (0, 0, 0),
+        };
+        let area = TextArea {
+            rows: 30,
+            cols: 100,
+            cell: (8, 16),
+        };
+        let a = |q| String::from_utf8(answer(q, &colors, area)).unwrap();
+        assert_eq!(a(Query::PrimaryDa), "\x1b[?62;22c");
+        assert_eq!(a(Query::SecondaryDa), "\x1b[>1;10;0c");
+        assert_eq!(
+            a(Query::XtVersion),
+            format!("\x1bP>|bosun {}\x1b\\", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(a(Query::SyncMode), "\x1b[?2026;0$y");
+        assert_eq!(a(Query::TextAreaCells), "\x1b[8;30;100t");
+        assert_eq!(a(Query::TextAreaPixels), "\x1b[4;480;800t");
+        assert_eq!(
+            a(Query::Color(ColorKind::Bg, Terminator::Bel)),
+            "\x1b]11;rgb:ffff/ffff/ffff\x07"
+        );
     }
 }

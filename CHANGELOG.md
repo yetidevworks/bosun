@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
 
+## [2.2.9] — 2026-10-23
+
+### TUI
+
+#### Fixed
+
+- **Esc reaches the session straight away, whatever tmux's `escape-time`.** In a session, Esc followed by another key within half a second arrived as Meta plus that key, so leaving Vim's insert mode and moving on quickly could run a Meta binding instead (#22). tmux holds a lone Esc for 500 ms while a query it sent the terminal is unanswered, and Bosun's embedded terminal never answered tmux's size query, which tmux 3.6 and later keep waiting on for good. The embed now has a pixel size, so tmux doesn't ask, and it answers tmux's device, version, synchronized-output and size queries, which also removes the 500 ms hold for the first five seconds after selecting or focusing a session. Thanks to @attilaolah for the report and the bisect.
+
+### Bosun for Mac
+
+Nothing in this release changes Bosun for Mac.
+
 ## [2.2.8] — 2026-10-21
 
 ### Both
