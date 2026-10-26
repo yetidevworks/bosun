@@ -725,6 +725,14 @@ impl SidebarModel {
         None
     }
 
+    /// The container holding a tab.
+    pub fn container_of(&self, internal: &str) -> Option<&Container> {
+        self.ungrouped
+            .iter()
+            .chain(self.sections.iter().flat_map(|s| s.members.iter()))
+            .find(|c| c.contains_internal(internal))
+    }
+
     /// Replace one internal name with another, in place. Used by
     /// the restart flow so a kill+recreate doesn't leave a dead
     /// row above the freshly-created session — the row's slot

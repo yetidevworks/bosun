@@ -1509,6 +1509,87 @@ fn serve_create_into_section() {
     assert!(!ls.contains("gamma"), "{ls}");
 }
 
+/// Restarting an exited tab (`create` with `replaces`, as Bosun for Mac
+/// does after a reboot ended every session) puts the new session in the
+/// exited tab's place: same row, same spot in its section, no new row.
+#[test]
+fn serve_create_replacing_an_exited_tab() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let seen = command(&mut c, 1, json!({"op": "insert_section", "name": "work"}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let sidebar = sidebar_until(&mut c, "the section", |sb| {
+        section_named(sb, "work").is_some()
+    });
+    let section = section_named(&sidebar, "work").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut made = Vec::new();
+    for (id, name) in [(2, "alpha"), (3, "beta")] {
+        let seen = command(
+            &mut c,
+            id,
+            json!({"op": "create", "section": section,
+                   "spec": {"name": name, "path": "/tmp", "agent": "terminal", "args": "sleep 600"}}),
+        );
+        let ack = seen.last().unwrap();
+        assert_eq!(ack["ok"], true, "{ack}");
+        made.push(ack["session"].as_str().unwrap().to_string());
+    }
+    let (alpha, beta) = (made[0].clone(), made[1].clone());
+    let sb = sidebar_until(&mut c, "both rows in the section", |sb| {
+        section_named(sb, "work").is_some_and(|s| s["members"].as_array().unwrap().len() == 2)
+    });
+    let alpha_row = row_of(&sb, &alpha).unwrap();
+
+    // The session ends behind the daemon's back, as on a reboot.
+    fx.tmux(&["kill-session", "-t", &alpha]);
+    sidebar_until(&mut c, "alpha exited", |sb| {
+        section_named(sb, "work").is_some_and(|s| s["members"][0]["tabs"][0]["alive"] == false)
+    });
+
+    let seen = command(
+        &mut c,
+        4,
+        json!({"op": "create", "replaces": alpha,
+               "spec": {"name": "alpha", "path": "/tmp", "agent": "terminal", "args": "sleep 600"}}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let fresh = ack["session"].as_str().unwrap().to_string();
+    let sb = sidebar_until(&mut c, "the restart in alpha's place", |sb| {
+        row_of(sb, &fresh).is_some()
+    });
+    assert_eq!(rows(&sb).len(), 2, "no new row: {sb}");
+    let members = section_named(&sb, "work").unwrap()["members"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(members[0]["id"], alpha_row.as_str(), "{sb}");
+    assert_eq!(row_tabs(&members[0]), vec![fresh.clone()], "{sb}");
+    assert_eq!(row_tabs(&members[1]), vec![beta.clone()], "{sb}");
+    assert_eq!(container_option(&fx, &fresh), alpha_row);
+
+    // `replaces` naming a live session is ignored: an ordinary create.
+    let seen = command(
+        &mut c,
+        5,
+        json!({"op": "create", "replaces": beta,
+               "spec": {"name": "gamma", "path": "/tmp", "agent": "terminal"}}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let gamma = ack["session"].as_str().unwrap().to_string();
+    let sb = sidebar_with(&mut c, &[&gamma]);
+    assert_eq!(rows(&sb).len(), 3, "{sb}");
+    assert_eq!(row_tabs(&rows(&sb)[0]), vec![gamma], "{sb}");
+    assert!(row_of(&sb, &beta).is_some(), "{sb}");
+}
+
 /// `set_section_defaults` stores a section's starting values for new
 /// sessions: they go out with the sidebar, survive a client's
 /// `sidebar_save` (which doesn't carry them) and a restart, and `null`

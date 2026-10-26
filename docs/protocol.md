@@ -95,6 +95,8 @@ Creates a session from a spec (see [Spec](#spec)). The display name is made uniq
 
 An optional `section` (a section id) puts the new row at the end of that section instead of among the ungrouped rows. An unknown section is refused before anything is created. It's ignored when `spec.container_id` adds the session to an existing row as a tab.
 
+An optional `replaces` (a session name) restarts an exited tab: the new session takes that tab's place in its row, so the row keeps its id and its spot in its section instead of a new row appearing. `spec.container_id` is set to that row when the spec leaves it empty, and `section` is then ignored. It's ignored when it names a live session or a tab that isn't in the sidebar. Bosun for Mac sends it for Restart and Resume on an exited row.
+
 The agent command is typed into the new shell straight away, unless `defer_launch` is `true`. Then the session starts as a bare shell, the `ack` carries `pending_launch`, and the client sends `launch_agent` with those values once its terminal view is attached. Agents like Codex probe the terminal's background color at startup; deferring the launch until a terminal is there to answer is what lets them pick the right palette (Bosun issue #2). A GUI that shows the session right away should defer.
 
 ```json

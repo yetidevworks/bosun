@@ -1225,7 +1225,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     /// Restart an exited row from the recents entry it was created from (the daemon says which; an older
-    /// one doesn't, so then the entry with its display name), under the name it has now.
+    /// one doesn't, so then the entry with its display name), under the name it has now and in its place.
     func restartExited(_ s: String, resume: Bool) {
         if isAlive(s) { restart(s, resume: resume); return }
         let name = displayName(s)
@@ -1237,7 +1237,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         var spec = r.spec
         spec.name = name
         spec.resume = resume
-        daemon.command(.create(spec: spec, deferLaunch: true)) { [weak self] ack in
+        daemon.command(.create(spec: spec, deferLaunch: true, replaces: s)) { [weak self] ack in
             guard let self else { return }
             self.report(ack)
             guard ack.ok, let new = ack.session else { return }

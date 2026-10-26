@@ -843,8 +843,9 @@ struct AnyKey: CodingKey {
 // MARK: - Client → daemon
 
 public enum Command: Equatable, Sendable {
-    /// A new session. `section` puts its new row at the end of that section (ignored for a tab of a row).
-    case create(spec: Spec, deferLaunch: Bool, section: String? = nil)
+    /// A new session. `section` puts its new row at the end of that section (ignored for a tab of a row);
+    /// `replaces` names an exited tab the session restarts, which it takes the place of.
+    case create(spec: Spec, deferLaunch: Bool, section: String? = nil, replaces: String? = nil)
     case kill(session: String)
     case killContainer(sessions: [String])
     case killRemoveWorktree(session: String, worktreePath: String, branch: String, merge: Bool)
@@ -952,10 +953,11 @@ public enum ClientMessage: Sendable {
                 try put("id", id)
                 try put("op", cmd.op)
                 switch cmd {
-                case .create(let spec, let deferLaunch, let section):
+                case .create(let spec, let deferLaunch, let section, let replaces):
                     try put("spec", spec)
                     try put("defer_launch", deferLaunch)
                     if let section { try put("section", section) }
+                    if let replaces { try put("replaces", replaces) }
                 case .kill(let s):
                     try put("session", s)
                 case .killContainer(let s):

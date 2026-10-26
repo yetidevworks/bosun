@@ -296,6 +296,9 @@ struct Inflight {
     /// The daemon's own create resuming a tab of an undocked row: the
     /// agent launches with its resume invocation.
     resume: bool,
+    /// A create restarting an exited tab: the new session takes that
+    /// tab's place when its refresh arrives.
+    replaces: Option<String>,
 }
 
 struct ClientConn {
@@ -593,7 +596,6 @@ impl Daemon {
             spec.name = name;
             spec.container_id = Some(row);
             spec.resume = true;
-            self.app.pending_restart_swap = Some(dead);
             self.forward(
                 0,
                 0,
@@ -604,6 +606,7 @@ impl Daemon {
             );
             if let Some(f) = self.inflight.back_mut() {
                 f.resume = true;
+                f.replaces = Some(dead);
             }
             self.resuming = true;
             return;
@@ -1040,6 +1043,7 @@ impl Daemon {
             pending_launch: None,
             section: None,
             resume: false,
+            replaces: None,
         });
     }
 
@@ -1047,10 +1051,22 @@ impl Daemon {
         use protocol::check_text;
         match op {
             CmdOp::Create {
-                spec,
+                mut spec,
                 defer_launch,
                 section,
+                replaces,
             } => {
+                // Restarting an exited tab: the new session joins that
+                // tab's row and takes its place there.
+                let replaces = replaces.filter(|t| self.app.session_by_name(t).is_none());
+                let row = replaces
+                    .as_deref()
+                    .and_then(|t| self.app.sidebar.container_of(t))
+                    .map(|c| c.id.clone());
+                let replaces = replaces.filter(|_| row.is_some());
+                if spec.container_id.is_none() {
+                    spec.container_id = row;
+                }
                 let section = section.filter(|_| spec.container_id.is_none());
                 if let Some(sid) = &section {
                     let e = match self.app.sidebar.sections.iter().find(|s| &s.id == sid) {
@@ -1074,6 +1090,7 @@ impl Daemon {
                         );
                         if let Some(f) = self.inflight.back_mut() {
                             f.section = section;
+                            f.replaces = replaces;
                         }
                     }
                     Err(e) => self.ack_result(client, id, Err(e)),
@@ -1707,6 +1724,11 @@ impl Daemon {
                         if matches!(f.kind, InflightKind::Create { .. }) {
                             f.session = Some(name.clone());
                             place = f.section.take().map(|s| (name.clone(), s));
+                            // Tied to this create's own refresh, so
+                            // another create can't take the swap.
+                            if let Some(dead) = f.replaces.take() {
+                                self.app.pending_restart_swap = Some(dead);
+                            }
                         }
                     }
                 }

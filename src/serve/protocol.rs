@@ -69,6 +69,11 @@ pub enum CmdOp {
         /// when `spec.container_id` adds the session to a row as a tab.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         section: Option<String>,
+        /// An exited tab this session restarts: it takes that tab's
+        /// place in its row instead of getting a row of its own.
+        /// Ignored unless it names a tab whose session has ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
     },
     Kill {
         session: String,
@@ -1185,6 +1190,7 @@ mod tests {
                 spec: spec(),
                 defer_launch: true,
                 section: Some("sec-1".into()),
+                replaces: Some("bosun-a-0".into()),
             },
             CmdOp::Kill {
                 session: "bosun-a-1".into(),

@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
 
+## [2.2.10] — 2026-10-26
+
+### Bosun for Mac
+
+#### Fixed
+
+- **Restart and Resume on an exited row bring it back in its place.** After a reboot, every row shows as exited; restarting or resuming one started the session in a new row and left the exited one behind, so each section ended up listing everything twice. The restarted session now takes the exited tab's place, in the same row and the same spot in its section, as it does in the TUI. `create` takes a new `replaces` field for this.
+
+### TUI
+
+Nothing in this release changes the TUI.
+
 ## [2.2.9] — 2026-10-23
 
 ### TUI
