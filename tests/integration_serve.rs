@@ -653,6 +653,37 @@ fn serve_theme_pair_palettes_and_settings() {
     assert!(!seen.iter().any(|v| v["t"] == "theme"), "{seen:#?}");
 }
 
+/// A deferred create keeps the spec's one-shot `resume` for its launch:
+/// the session's metadata doesn't store it, so `pending_launch` carries
+/// it to the client, which passes it back with `launch_agent`.
+#[test]
+fn serve_deferred_create_keeps_resume() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    for (id, resume) in [(1, true), (2, false)] {
+        c.send(json!({
+            "t": "cmd", "id": id, "op": "create", "defer_launch": true,
+            "spec": {"name": format!("resume-{resume}"), "path": "/tmp", "agent": "claude",
+                     "resume": resume}
+        }));
+        let seen = c.until("create ack", |v| is_ack(v, id));
+        let ack = seen.last().unwrap();
+        assert_eq!(ack["ok"], true, "{ack}");
+        let launch = &ack["pending_launch"];
+        assert_eq!(launch["session"], ack["session"], "{ack}");
+        if resume {
+            assert_eq!(launch["resume"], true, "{ack}");
+        } else {
+            assert!(launch.get("resume").is_none_or(|r| r.is_null()), "{ack}");
+        }
+        let name = ack["session"].as_str().unwrap().to_string();
+        fx.tmux(&["kill-session", "-t", &name]);
+    }
+}
+
 #[test]
 fn serve_hook_state_reaches_clients_within_the_poll() {
     let mut fx = fixture();
@@ -1588,6 +1619,158 @@ fn serve_create_replacing_an_exited_tab() {
     assert_eq!(rows(&sb).len(), 3, "{sb}");
     assert_eq!(row_tabs(&rows(&sb)[0]), vec![gamma], "{sb}");
     assert!(row_of(&sb, &beta).is_some(), "{sb}");
+}
+
+/// `search` walks a session's whole history in tmux's copy mode: typing
+/// refines one search from the bottom, `older`/`newer` step through the
+/// matches, and `end` puts the pane back at its live output.
+#[test]
+fn serve_search_walks_the_history() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    // 300 lines: far more than the pane shows, so most are in history.
+    let s = create_terminal(
+        &mut c,
+        1,
+        "hist",
+        "seq -f 'row %g pages_manage' 1 300; echo 'Mixed TUI line'; sleep 600",
+    );
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let out = fx.tmux(&["capture-pane", "-p", "-t", &s]);
+        let screen = String::from_utf8_lossy(&out.stdout).into_owned();
+        if screen.contains("Mixed TUI line") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the output never came: {screen}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let line = |fx: &Fixture| {
+        let out = fx.tmux(&[
+            "display",
+            "-p",
+            "-t",
+            &s,
+            "#{pane_in_mode}|#{copy_cursor_line}",
+        ]);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let mut id = 10;
+    let mut search_with = |c: &mut Conn, action: &str, text: &str, extra: Value| {
+        id += 1;
+        let mut op = json!({"op": "search", "session": s, "action": action, "text": text});
+        op.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let seen = command(c, id, op);
+        let ack = seen.last().unwrap().clone();
+        assert_eq!(ack["ok"], true, "{ack}");
+        ack["search"].clone()
+    };
+
+    // Typed a character at a time: the last keystroke decides.
+    search_with(&mut c, "find", "row 2", json!({}));
+    let r = search_with(&mut c, "find", "row 29", json!({}));
+    assert_eq!(r["found"], true, "{r}");
+    assert_eq!(line(&fx), "1|row 299 pages_manage");
+    if r.get("count").is_some() {
+        // row 29, 290…299
+        assert_eq!(r["count"], 11, "{r}");
+    }
+    search_with(&mut c, "older", "row 29", json!({}));
+    assert_eq!(line(&fx), "1|row 298 pages_manage");
+    search_with(&mut c, "older", "row 29", json!({}));
+    assert_eq!(line(&fx), "1|row 297 pages_manage");
+    search_with(&mut c, "newer", "row 29", json!({}));
+    assert_eq!(line(&fx), "1|row 298 pages_manage");
+    // Each change of direction moves on (tmux 3.4 needs a second step).
+    search_with(&mut c, "older", "row 29", json!({}));
+    assert_eq!(line(&fx), "1|row 297 pages_manage");
+    search_with(&mut c, "newer", "row 29", json!({}));
+    search_with(&mut c, "newer", "row 29", json!({}));
+    assert_eq!(line(&fx), "1|row 299 pages_manage");
+
+    // The wheel in copy mode reaches a program that takes the mouse on
+    // the alternate screen, and otherwise scrolls as tmux's own binding
+    // did, which is kept.
+    for table in ["copy-mode", "copy-mode-vi"] {
+        let out = fx.tmux(&["list-keys", "-T", table, "WheelUpPane"]);
+        let binding = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            binding.contains("#{&&:#{alternate_on},#{mouse_any_flag}}")
+                && binding.contains("send-keys -M")
+                && binding.contains("scroll-up"),
+            "{binding}"
+        );
+    }
+
+    // Deep in the history.
+    let r = search_with(&mut c, "find", "row 7 pages", json!({}));
+    assert_eq!(r["found"], true, "{r}");
+    assert_eq!(line(&fx), "1|row 7 pages_manage");
+    // The text is literal, not a pattern, and quotes are kept.
+    let r = search_with(&mut c, "find", "row.7", json!({}));
+    assert_eq!(r["found"], false, "{r}");
+    assert!(r.get("count").is_none(), "{r}");
+
+    // Case is ignored unless asked for.
+    let r = search_with(&mut c, "find", "mixed tui", json!({}));
+    assert_eq!(r["found"], true, "{r}");
+    assert_eq!(line(&fx), "1|Mixed TUI line");
+    let r = search_with(&mut c, "find", "tui", json!({"match_case": true}));
+    assert_eq!(r["found"], false, "{r}");
+    let r = search_with(&mut c, "find", "TUI", json!({"match_case": true}));
+    assert_eq!(r["found"], true, "{r}");
+    let r = search_with(&mut c, "find", "Pages", json!({"match_case": true}));
+    assert_eq!(r["found"], false, "{r}");
+
+    // The client's colours mark the matches; anything but #rrggbb is
+    // left out.
+    let style = |fx: &Fixture, opt: &str| {
+        let out = fx.tmux(&["show", "-wv", "-t", &s, opt]);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let colors = |bg: &str| {
+        json!({"colors": {"current_bg": bg, "current_fg": "#000000",
+                          "match_bg": "#4b3f6b", "match_fg": "#f8f8f2"}})
+    };
+    search_with(&mut c, "find", "row 29", colors("#bd93f9"));
+    assert_eq!(
+        style(&fx, "copy-mode-current-match-style"),
+        "bg=#bd93f9,fg=#000000"
+    );
+    assert_eq!(style(&fx, "copy-mode-match-style"), "bg=#4b3f6b,fg=#f8f8f2");
+    search_with(&mut c, "find", "row 29", colors("red,blink"));
+    assert_eq!(
+        style(&fx, "copy-mode-current-match-style"),
+        "bg=#bd93f9,fg=#000000"
+    );
+
+    // Left copy mode behind Bosun's back: the next step starts again.
+    fx.tmux(&["send-keys", "-t", &s, "-X", "cancel"]);
+    let r = search_with(&mut c, "older", "row 29", json!({}));
+    assert_eq!(r["found"], true, "{r}");
+    assert_eq!(line(&fx), "1|row 299 pages_manage");
+
+    // `end`, and `find` with nothing typed, leave copy mode.
+    let r = search_with(&mut c, "end", "", json!({}));
+    assert_eq!(r["found"], false, "{r}");
+    assert!(line(&fx).starts_with("0|"), "{}", line(&fx));
+    search_with(&mut c, "find", "row 29", json!({}));
+    search_with(&mut c, "find", "", json!({}));
+    assert!(line(&fx).starts_with("0|"), "{}", line(&fx));
+    // `end` on a pane not in copy mode does nothing.
+    search_with(&mut c, "end", "", json!({}));
+
+    let seen = command(
+        &mut c,
+        99,
+        json!({"op": "search", "session": "bosun-nope-1", "action": "find", "text": "x"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false, "{seen:#?}");
 }
 
 /// `set_section_defaults` stores a section's starting values for new

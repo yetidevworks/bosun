@@ -124,6 +124,10 @@ final class Workspace {
         chrome.values.compactMap(\.placeholderView).first { !$0.isHiddenOrHasHiddenAncestor }?.title.stringValue
     }
     func headerZoomNote(_ tile: TileID) -> String? { chrome[tile]?.headerZoomNote }
+    /// The find bar open on a pane (Cmd+F), if any.
+    func findBar(for tile: TileID) -> PaneFindBar? { chrome[tile]?.findBar.flatMap { $0.isHidden ? nil : $0 } }
+    func showFindBar(for tile: TileID) -> PaneFindBar? { chrome[tile]?.showFindBar() }
+    func hideFindBar(for tile: TileID) { chrome[tile]?.findBar?.isHidden = true }
     func session(in tile: TileID) -> String? { tile.isEmpty ? nil : tile }
 
     func terminal(in tile: TileID) -> TerminalView? {
@@ -581,6 +585,7 @@ final class Workspace {
         if let d = tileDrag, !ids.contains(d.tile) { cancelTileDrag() }
         for (id, v) in chrome where !ids.contains(id) {
             v.isHidden = true
+            v.findBar?.isHidden = true
             v.frame = .zero
             chrome[id] = nil
             spareChrome.append(v)
@@ -641,6 +646,7 @@ final class Workspace {
         }
         for d in dividers { d.color = theme.shadow; d.needsDisplay = true }
         area.layer?.backgroundColor = (GhosttyRuntime.shared.configColor("background") ?? theme.bg).cgColor
+        owner?.findPaneMayHaveChanged()
     }
 
     func windowKeyChanged(_ key: Bool) {
@@ -841,10 +847,18 @@ final class Workspace {
         dragEnded()
         guard let t = tile(at: p), layout.contains(t), app.isAlive(t) else { return false }
         activate(t)
-        DropReader.read(info.draggingPasteboard) { [weak self] text in
-            guard let text, let v = self?.pool.view(for: t) else { return }
+        // A drop closes the find bar on the pane, and the pane leaves copy mode (where the find left it, or
+        // tmux's own keys) first, since copy mode would take the paste as its keys.
+        if owner.findSession == t { owner.closeFind(leaveCopyMode: false) }
+        // The drop is read straight away, while the drag's pasteboard is sure to hold it; the paste waits
+        // for both.
+        var dropped: String??, left = false
+        let paste = { [weak self] in
+            guard left, case .some(.some(let text)) = dropped, let v = self?.pool.view(for: t) else { return }
             v.paste(text)
         }
+        app.daemon.command(.search(session: t, action: .end, text: "")) { _ in left = true; paste() }
+        DropReader.read(info.draggingPasteboard) { text in dropped = .some(text); paste() }
         return true
     }
 }
@@ -895,6 +909,8 @@ final class TileChromeView: NSView {
     private let dim = CALayer()
     private let dropHighlight = CALayer()
     private var placeholder: PlaceholderView?
+    /// The find bar (Cmd+F), made the first time this pane wants one.
+    private(set) var findBar: PaneFindBar?
     private(set) var isActive = false
     private var session: String?
     /// The session the header names, and the placeholder (for the test modes).
@@ -949,6 +965,13 @@ final class TileChromeView: NSView {
         super.layout()
         header.frame = NSRect(x: 0, y: 0, width: bounds.width, height: Workspace.headerHeight)
         placeholder?.frame = NSRect(x: 0, y: Workspace.headerHeight, width: bounds.width, height: max(0, bounds.height - Workspace.headerHeight))
+        if let f = findBar {
+            // In the terminal's top right corner, over the end of its first line, where tmux writes its
+            // copy-mode position ("[0/76] (22 results)") while the search runs.
+            let t = Workspace.terminalRect(in: bounds)
+            let w = min(PaneFindBar.width, bounds.width - 24)
+            f.frame = NSRect(x: t.maxX - w, y: t.minY, width: max(0, w), height: PaneFindBar.height)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         border.frame = bounds
@@ -967,6 +990,7 @@ final class TileChromeView: NSView {
                 zoomNote: String?, theme: AppTheme) {
         self.session = session
         isActive = active
+        if let f = findBar, !f.isHidden { f.theme = theme }
         let app = workspace.app
         header.draggable = showRing
         header.update(name: session.map { app.displayName($0) }, group: session.flatMap { app.groupLabel($0) },
@@ -1018,12 +1042,32 @@ final class TileChromeView: NSView {
         let p = convert(point, from: superview)
         guard bounds.contains(p) else { return nil }
         if p.y < Workspace.headerHeight { return header }
+        if let f = findBar, !f.isHidden, f.frame.contains(p) { return f.hitTest(p) ?? f }
         if !isActive { return self }
         if let placeholder, let hit = placeholder.hitTest(convert(p, to: placeholder.superview)) { return hit }
         return placeholder != nil ? self : nil
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Show the find bar, above the terminal at the top right.
+    func showFindBar() -> PaneFindBar {
+        let f = findBar ?? {
+            let f = PaneFindBar()
+            f.onChange = { [weak self] in self?.workspace.owner.findStep(.find) }
+            f.onStep = { [weak self] in self?.workspace.owner.findStep($0) }
+            f.onClose = { [weak self] in self?.workspace.owner.closeFind(leaveCopyMode: true) }
+            f.onMatchCase = { [weak self] in self?.workspace.owner.toggleFindMatchCase() }
+            addSubview(f, positioned: .above, relativeTo: header)
+            findBar = f
+            return f
+        }()
+        f.theme = workspace.app.theme
+        f.isHidden = false
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        return f
+    }
 
     /// The terminal a Cmd+click on this inactive tile went on to, which gets the mouse-up too.
     private var forwardedClick: TerminalView?

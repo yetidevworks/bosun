@@ -50,7 +50,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// The row under the pointer, filled lightly (rows and tabs only).
     private(set) weak var hoveredItem: SidebarItem?
 
-    // The filter (Cmd+F), this window's own and never saved.
+    // The filter (Option+Cmd+F), this window's own and never saved.
     /// What's typed, applied live while the field has the keyboard and kept after Return.
     private(set) var filterQuery = ""
     /// The field or the chip is showing.
@@ -428,7 +428,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    /// Cmd+F and the magnifier: open the field (or give it the keyboard again, the query selected); with
+    /// Option+Cmd+F and the magnifier: open the field (or give it the keyboard again, the query selected); with
     /// the field focused and empty, close it.
     func toggleFilter() {
         if filterEditing {
@@ -444,6 +444,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // One exception at a time: a rename in progress ends (keeping its name), the palette closes.
         if owner.focus.exception == .rename { window.makeFirstResponder(nil) }
         if owner.focus.exception == .palette, owner.palette != nil { app.closePalette() }
+        if owner.focus.exception == .find { owner.closeFind(leaveCopyMode: true) }
         guard owner.focus.exception == nil else { NSSound.beep(); return }
         filterShown = true
         let field = view.filterBar.field

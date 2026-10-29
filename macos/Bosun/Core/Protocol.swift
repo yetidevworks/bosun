@@ -652,6 +652,59 @@ public struct PendingLaunch: Codable, Equatable, Sendable {
     public var resume: Bool?
 }
 
+/// One step of a search through a session's history (tmux's copy mode).
+public enum SearchAction: String, Codable, Sendable {
+    /// Search for the text as typed so far, towards older output.
+    case find
+    /// The next match towards older output.
+    case older
+    /// The next match towards newer output.
+    case newer
+    /// Leave copy mode, back to the live output.
+    case end
+}
+
+/// How a search marks matches, as `#rrggbb`: the match the pane is on, and every other.
+public struct SearchColors: Codable, Equatable, Sendable {
+    public var currentBg, currentFg, matchBg, matchFg: String
+
+    public init(currentBg: String, currentFg: String, matchBg: String, matchFg: String) {
+        self.currentBg = currentBg; self.currentFg = currentFg; self.matchBg = matchBg; self.matchFg = matchFg
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case currentBg = "current_bg", currentFg = "current_fg", matchBg = "match_bg", matchFg = "match_fg"
+    }
+}
+
+/// Where a search stands after a step.
+public struct SearchState: Codable, Equatable, Sendable {
+    public var found: Bool
+    /// Matches in the whole history; nil when tmux doesn't count them (3.4 doesn't).
+    public var count: Int?
+    /// tmux stopped counting early: there are at least `count`.
+    public var partial: Bool
+
+    public init(found: Bool, count: Int? = nil, partial: Bool = false) {
+        self.found = found; self.count = count; self.partial = partial
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        found = try c.decode(Bool.self, forKey: .found)
+        count = try c.decodeIfPresent(Int.self, forKey: .count)
+        partial = try c.decodeIfPresent(Bool.self, forKey: .partial) ?? false
+    }
+
+    /// What the find bar says: "12 matches", "1,000+ matches", "No matches", or "Found" when tmux can't count.
+    public var label: String {
+        guard found else { return "No matches" }
+        guard let count else { return "Found" }
+        let n = count.formatted()
+        return "\(n)\(partial ? "+" : "") \(count == 1 && !partial ? "match" : "matches")"
+    }
+}
+
 public struct Ack: Codable, Equatable, Sendable {
     public var id: UInt64
     public var ok: Bool
@@ -662,9 +715,11 @@ public struct Ack: Codable, Equatable, Sendable {
     public var theme: ThemePalette?
     public var pendingLaunch: PendingLaunch?
     public var messages: [String]
+    /// `search`: where the search stands.
+    public var search: SearchState?
 
     enum CodingKeys: String, CodingKey {
-        case id, ok, error, session, spec, theme, messages
+        case id, ok, error, session, spec, theme, messages, search
         case pendingLaunch = "pending_launch"
     }
 
@@ -683,6 +738,7 @@ public struct Ack: Codable, Equatable, Sendable {
         spec = try c.decodeIfPresent(Spec.self, forKey: .spec)
         theme = try c.decodeIfPresent(ThemePalette.self, forKey: .theme)
         pendingLaunch = try c.decodeIfPresent(PendingLaunch.self, forKey: .pendingLaunch)
+        search = try c.decodeIfPresent(SearchState.self, forKey: .search)
         messages = try c.decodeIfPresent([String].self, forKey: .messages) ?? []
     }
 }
@@ -876,6 +932,9 @@ public enum Command: Equatable, Sendable {
     case moveTab(session: String, container: String?, index: Int?, section: String? = nil)
     /// Move every tab of row `from` into row `into` (at `index` among its tabs, at the end with nil).
     case mergeRows(from: String, into: String, index: Int?)
+    /// A step of a search through a session's history; the ack carries `search`. Case is ignored unless
+    /// `matchCase`; `colors` (on a `find`) set how matches look.
+    case search(session: String, action: SearchAction, text: String, matchCase: Bool = false, colors: SearchColors? = nil)
 
     public var op: String {
         switch self {
@@ -902,6 +961,7 @@ public enum Command: Equatable, Sendable {
         case .makeLatest: "make_latest"
         case .moveTab: "move_tab"
         case .mergeRows: "merge_rows"
+        case .search: "search"
         }
     }
 }
@@ -1010,6 +1070,10 @@ public enum ClientMessage: Sendable {
                 case .mergeRows(let from, let into, let index):
                     try put("from", from); try put("into", into)
                     if let index { try put("index", index) }
+                case .search(let s, let action, let text, let matchCase, let colors):
+                    try put("session", s); try put("action", action); try put("text", text)
+                    if matchCase { try put("match_case", true) }
+                    if let colors { try put("colors", colors) }
                 }
             }
         }

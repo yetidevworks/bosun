@@ -12,7 +12,19 @@ final class BosunWindow {
     let root: RootView
     let sidebar: SidebarController
     let workspace: Workspace
-    var focus = FocusModel()
+    var focus = FocusModel() {
+        didSet {
+            if oldValue.exception == .find, focus.exception != .find, findSession != nil { findLostKeyboard() }
+        }
+    }
+    /// The session whose pane has the find bar open (`PaneFind.swift`).
+    var findSession: String?
+    /// The last search typed in this window, offered again by the next Cmd+F.
+    var lastFindText = ""
+    /// The find bar's Aa toggle: match case. Off by default; kept for the window, not saved.
+    var findMatchCase = false
+    /// Counts search steps, so only the latest step's answer reaches the bar.
+    var findSeq = 0
     var palette: PaletteView?
     var shortcutsPanel: ShortcutsPanel?
     var sendNextPending = false

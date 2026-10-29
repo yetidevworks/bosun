@@ -6,6 +6,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
 
+## [2.2.11] — 2026-10-29
+
+### Bosun for Mac
+
+#### Added
+
+- **Find in a pane (Cmd+F).** A find bar opens in the top right corner of the active pane, saying "Find in" and the session's name, and searches the session's whole history, not just what's on screen. Typing searches as you go, Return or Cmd+G goes to the next older match and Shift+Return or Cmd+Shift+G to the next newer one, and the bar says how many matches there are. Case is ignored unless you turn on the bar's Aa toggle, and matches show in the theme's accent colour. Esc closes it and takes the pane back to its live output; a click in the pane closes it but leaves the pane at the match, to select from there. Dropping a file or image on the pane closes it too, so the drop is pasted into the live terminal. The mouse wheel keeps working with the matches marked; in Claude Code (or any program that scrolls itself on the alternate screen) it takes the pane back to its live output and scrolls the program. Such programs keep their own scrollback, so in their panes find searches what's on screen; for Claude Code, `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1"` in the `[env]` table of `config.toml` switches it to its classic renderer, whose output tmux keeps, so find covers the whole conversation. The history lives in tmux, so the search runs in tmux's copy mode, which highlights every match. `bosun serve` has a new `search` command for this.
+
+#### Changed
+
+- **Filter Sessions moves to Option+Cmd+F**, so Cmd+F can find in the pane as it does in other terminals. The magnifier in the sidebar header still opens the filter.
+
+#### Fixed
+
+- **Resume on an exited row resumes the conversation.** It started the agent fresh, as Restart does: the daemon dropped the create's `resume` before the deferred launch.
+
+### TUI
+
+Nothing in this release changes the TUI.
+
 ## [2.2.10] — 2026-10-26
 
 ### Bosun for Mac

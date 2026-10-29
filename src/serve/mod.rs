@@ -43,8 +43,8 @@ use crate::ui::Theme;
 
 use protocol::{
     Ack, ClientMsg, CmdEnvelope, CmdOp, ConfigWire, KeybindingsWire, PendingLaunchWire, RecentWire,
-    ServerInfo, ServerMsg, SessionWire, SettingWire, SidebarWire, Snapshot, SpecWire, StatusInfo,
-    ThemeEntry, ThemeSource, ThemeWire, PROTOCOL_VERSION,
+    SearchAction, SearchWire, ServerInfo, ServerMsg, SessionWire, SettingWire, SidebarWire,
+    Snapshot, SpecWire, StatusInfo, ThemeEntry, ThemeSource, ThemeWire, PROTOCOL_VERSION,
 };
 
 /// Default for [`ServeOptions::idle_timeout`].
@@ -299,6 +299,10 @@ struct Inflight {
     /// A create restarting an exited tab: the new session takes that
     /// tab's place when its refresh arrives.
     replaces: Option<String>,
+    /// A client's create asked for the resume invocation (`spec.resume`):
+    /// a deferred launch is told so, since the session's metadata doesn't
+    /// keep it.
+    launch_resume: bool,
 }
 
 struct ClientConn {
@@ -1044,6 +1048,7 @@ impl Daemon {
             section: None,
             resume: false,
             replaces: None,
+            launch_resume: false,
         });
     }
 
@@ -1082,6 +1087,7 @@ impl Daemon {
                 }
                 match spec.to_spec() {
                     Ok(spec) => {
+                        let launch_resume = spec.resume;
                         self.forward(
                             client,
                             id,
@@ -1091,6 +1097,7 @@ impl Daemon {
                         if let Some(f) = self.inflight.back_mut() {
                             f.section = section;
                             f.replaces = replaces;
+                            f.launch_resume = launch_resume;
                         }
                     }
                     Err(e) => self.ack_result(client, id, Err(e)),
@@ -1350,6 +1357,60 @@ impl Daemon {
                     .await
                     .map_err(|e| e.to_string());
                 self.ack_result(client, id, r);
+            }
+            CmdOp::Search {
+                session,
+                action,
+                text,
+                match_case,
+                colors,
+            } => {
+                use crate::tmux::client::{SearchHighlight, SearchStep};
+                let step = match action {
+                    SearchAction::Find => SearchStep::Find(text),
+                    SearchAction::Older => SearchStep::Older(text),
+                    SearchAction::Newer => SearchStep::Newer(text),
+                    SearchAction::End => SearchStep::End,
+                };
+                // Colours go to tmux as a style: only `#rrggbb`.
+                let hex = |c: &str| {
+                    c.len() == 7
+                        && c.starts_with('#')
+                        && c[1..].chars().all(|d| d.is_ascii_hexdigit())
+                };
+                let highlight = colors
+                    .filter(|c| {
+                        [&c.current_bg, &c.current_fg, &c.match_bg, &c.match_fg]
+                            .iter()
+                            .all(|c| hex(c))
+                    })
+                    .map(|c| SearchHighlight {
+                        current: format!("bg={},fg={}", c.current_bg, c.current_fg),
+                        other: format!("bg={},fg={}", c.match_bg, c.match_fg),
+                    });
+                let ack = match self
+                    .client
+                    .copy_mode_search(&session, &step, match_case, highlight.as_ref())
+                    .await
+                {
+                    Ok(r) => Ack {
+                        id,
+                        ok: true,
+                        search: Some(SearchWire {
+                            found: r.found,
+                            count: r.count,
+                            partial: r.partial,
+                        }),
+                        ..Default::default()
+                    },
+                    Err(e) => Ack {
+                        id,
+                        ok: false,
+                        error: Some(format!("search: {e}")),
+                        ..Default::default()
+                    },
+                };
+                self.send_to(client, &ServerMsg::Ack(ack));
             }
         }
     }
@@ -1778,13 +1839,14 @@ impl Daemon {
             theme: None,
             pending_launch: f.pending_launch,
             messages: f.messages,
+            search: None,
         };
         if let InflightKind::Create { defer_launch } = f.kind {
             if let (true, Some(session)) = (ack.ok, f.session) {
                 if defer_launch {
                     ack.pending_launch = Some(PendingLaunchWire {
                         session,
-                        resume: None,
+                        resume: f.launch_resume.then_some(true),
                     });
                 } else {
                     let _ = self.cmd_tx.send(Command::LaunchAgent {

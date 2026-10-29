@@ -125,6 +125,31 @@ final class ProtocolTests: XCTestCase {
                        .error(code: "protocol_mismatch", message: "update bosun"))
     }
 
+    func testSearchAckAndCommand() throws {
+        guard case .ack(let a) = try decode(#"{"t":"ack","id":3,"ok":true,"search":{"found":true,"count":12}}"#) else { return XCTFail() }
+        XCTAssertEqual(a.search, SearchState(found: true, count: 12))
+        XCTAssertEqual(a.search?.label, "12 matches")
+        guard case .ack(let none) = try decode(#"{"t":"ack","id":4,"ok":true,"search":{"found":false}}"#) else { return XCTFail() }
+        XCTAssertEqual(none.search?.label, "No matches")
+        XCTAssertEqual(SearchState(found: true, count: 1).label, "1 match")
+        XCTAssertEqual(SearchState(found: true, count: 1, partial: true).label, "1+ matches")
+        // tmux 3.4 doesn't count.
+        XCTAssertEqual(SearchState(found: true).label, "Found")
+        let body = try ClientMessage.cmd(id: 5, .search(session: "s", action: .older, text: "pages_manage")).encoded()
+        let obj = try JSONSerialization.jsonObject(with: body) as! [String: Any]
+        XCTAssertEqual(obj["op"] as? String, "search")
+        XCTAssertEqual(obj["action"] as? String, "older")
+        XCTAssertEqual(obj["text"] as? String, "pages_manage")
+        XCTAssertNil(obj["match_case"])
+        XCTAssertNil(obj["colors"])
+        let colors = SearchColors(currentBg: "#bd93f9", currentFg: "#000000", matchBg: "#4b3f6b", matchFg: "#f8f8f2")
+        let cased = try ClientMessage.cmd(id: 6, .search(session: "s", action: .find, text: "TUI", matchCase: true, colors: colors)).encoded()
+        let o2 = try JSONSerialization.jsonObject(with: cased) as! [String: Any]
+        XCTAssertEqual(o2["match_case"] as? Bool, true)
+        XCTAssertEqual(o2["colors"] as? [String: String], ["current_bg": "#bd93f9", "current_fg": "#000000",
+                                                           "match_bg": "#4b3f6b", "match_fg": "#f8f8f2"])
+    }
+
     func testUnknownKindKeepsSeq() throws {
         XCTAssertEqual(try decode(#"{"t":"wobble","seq":12,"x":1}"#), .unknown(kind: "wobble", seq: 12))
     }

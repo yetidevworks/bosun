@@ -260,6 +260,123 @@ pub enum Retry {
     Unsafe,
 }
 
+/// One step of [`TokioTmuxClient::copy_mode_search`]. Each carries the
+/// search text, so a step can start the search again if the pane has
+/// left copy mode since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchStep {
+    /// Search for the text as typed so far.
+    Find(String),
+    /// The next match towards older output.
+    Older(String),
+    /// The next match towards newer output.
+    Newer(String),
+    /// Leave copy mode: the pane is back at its live output.
+    End,
+}
+
+/// How [`TokioTmuxClient::copy_mode_search`] marks matches: tmux
+/// styles (`bg=#rrggbb,fg=#rrggbb`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHighlight {
+    /// The match the pane is on.
+    pub current: String,
+    /// Every other match.
+    pub other: String,
+}
+
+/// The regular expression that finds `text` as typed. tmux ignores case
+/// when an expression has no capital letter: without `match_case` the
+/// text is lowercased, and with it, text without a capital gets one that
+/// matches nothing (`[A]{0}`).
+pub fn search_pattern(text: &str, match_case: bool) -> String {
+    let text = if match_case {
+        text.to_string()
+    } else {
+        text.to_lowercase()
+    };
+    let mut pattern = String::with_capacity(text.len() + 8);
+    if match_case
+        && text.chars().any(|c| c.is_ascii_lowercase())
+        && !text.chars().any(|c| c.is_ascii_uppercase())
+    {
+        pattern.push_str("[A]{0}");
+    }
+    for c in text.chars() {
+        if "\\.[]()*+?{}^$|".contains(c) {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern
+}
+
+/// A search step left the cursor on the match it was already on: on the
+/// same line, and no further than the match is wide, where the next match
+/// on that line would be at least that far. `before` and `after` end in
+/// `#{scroll_position}|#{copy_cursor_y}|#{copy_cursor_x}`. tmux 3.4, which
+/// doesn't count matches, is checked by the line alone, as before.
+fn search_stalled(before: &str, after: &str, text: &str, counted: bool) -> bool {
+    fn cursor(state: &str) -> Option<(&str, &str, i64)> {
+        let mut f = state.rsplitn(4, '|');
+        let x = f.next()?.parse().ok()?;
+        let y = f.next()?;
+        let scroll = f.next()?;
+        Some((scroll, y, x))
+    }
+    let (Some((bs, by, bx)), Some((as_, ay, ax))) = (cursor(before), cursor(after)) else {
+        return false;
+    };
+    if (bs, by) != (as_, ay) {
+        return false;
+    }
+    !counted || (ax - bx).unsigned_abs() <= text.chars().count() as u64
+}
+
+/// The pane's program takes the mouse on the alternate screen.
+const WHEEL_TO_PROGRAM: &str = "#{&&:#{alternate_on},#{mouse_any_flag}}";
+
+/// The command a `list-keys -T <table> <key>` line binds, to keep for
+/// the history, with its `\;` separators as a plain `;` (it goes inside
+/// `if-shell`). `None` when the key is unbound or already Bosun's.
+fn wheel_command(line: &str, key: &str) -> Option<String> {
+    let line = line.lines().next()?;
+    let (_, command) = line.split_once(&format!(" {key} "))?;
+    let command = command.trim();
+    if command.is_empty() || command.contains(WHEEL_TO_PROGRAM) {
+        return None;
+    }
+    Some(command.replace(" \\; ", " ; "))
+}
+
+/// Where a search stands after a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchResult {
+    /// The pane is on a match.
+    pub found: bool,
+    /// Matches in the whole history. `None` on a tmux too old to count
+    /// them (3.4 has no `search_count`).
+    pub count: Option<u64>,
+    /// tmux stopped counting before the end of a long history: there
+    /// are at least `count`.
+    pub partial: bool,
+}
+
+impl SearchResult {
+    /// `#{search_present}|#{search_count}|#{search_count_partial}`.
+    fn parse(s: &str) -> Self {
+        let mut f = s.split('|');
+        let found = f.next() == Some("1");
+        let count = f.next().and_then(|c| c.parse().ok()).filter(|_| found);
+        let partial = found && f.next() == Some("1");
+        Self {
+            found,
+            count,
+            partial,
+        }
+    }
+}
+
 impl TokioTmuxClient {
     pub fn new() -> Self {
         Self::build(None)
@@ -443,6 +560,174 @@ impl TokioTmuxClient {
         } else {
             Err(BosunError::Tmux(format!(
                 "switch-client -c {tty}: {}",
+                out.stderr.trim()
+            )))
+        }
+    }
+
+    /// One step of a search through a session's history, in tmux's copy
+    /// mode, so it covers the whole scrollback and tmux highlights every
+    /// match. Each new search starts from the bottom, towards older
+    /// output. `highlight` sets how matches look, on a `Find`.
+    pub async fn copy_mode_search(
+        &self,
+        session: &str,
+        step: &SearchStep,
+        match_case: bool,
+        highlight: Option<&SearchHighlight>,
+    ) -> Result<SearchResult> {
+        let target = format!("={session}:");
+        let mode = self
+            .display(&target, "#{pane_in_mode}|#{pane_mode}")
+            .await?;
+        let in_copy_mode = mode == "1|copy-mode";
+        let text = match step {
+            SearchStep::Find(t) | SearchStep::Older(t) | SearchStep::Newer(t) => t.as_str(),
+            SearchStep::End => "",
+        };
+        if text.is_empty() {
+            if in_copy_mode {
+                self.copy_mode_command(&target, &["cancel"]).await?;
+            }
+            return Ok(SearchResult::default());
+        }
+        // Not in copy mode any more (left with q, or from another
+        // client): start the search again rather than step through one
+        // that's gone.
+        let find = !in_copy_mode || matches!(step, SearchStep::Find(_));
+        if !in_copy_mode {
+            self.wheel_reaches_mouse_programs().await;
+            let out = self.run(&["copy-mode", "-t", &target], Retry::Safe).await?;
+            if !out.success {
+                return Err(BosunError::Tmux(format!(
+                    "copy-mode {session}: {}",
+                    out.stderr.trim()
+                )));
+            }
+        }
+        if let (true, Some(h)) = (find, highlight) {
+            for (opt, style) in [
+                ("copy-mode-current-match-style", &h.current),
+                ("copy-mode-match-style", &h.other),
+            ] {
+                // Best-effort: tmux's own colours still mark the matches.
+                if let Err(e) = self
+                    .run(
+                        &["set-option", "-w", "-t", &target, opt, style],
+                        Retry::Safe,
+                    )
+                    .await
+                {
+                    tracing::warn!("set {opt} on {session}: {e}");
+                }
+            }
+        }
+        // The search's state, then where the cursor is (the last three
+        // fields).
+        const STATE: &str = "#{search_present}|#{search_count}|#{search_count_partial}|#{scroll_position}|#{copy_cursor_y}|#{copy_cursor_x}";
+        if find {
+            // A regular expression rather than tmux's plain-text search,
+            // whose case rule can't be changed. Each keystroke searches
+            // again from the bottom.
+            let pattern = search_pattern(text, match_case);
+            self.copy_mode_command(&target, &["history-bottom"]).await?;
+            self.copy_mode_command(&target, &["end-of-line"]).await?;
+            self.copy_mode_command(&target, &["search-backward", &pattern])
+                .await?;
+            return Ok(SearchResult::parse(&self.display(&target, STATE).await?));
+        }
+        let command = match step {
+            SearchStep::Newer(_) => "search-reverse",
+            _ => "search-again",
+        };
+        let before = self.display(&target, STATE).await?;
+        self.copy_mode_command(&target, &[command]).await?;
+        let mut state = self.display(&target, STATE).await?;
+        // When the direction changes, tmux (3.4 and 3.8 alike) only moves
+        // to the other end of the match it's already on: step once more.
+        let result = SearchResult::parse(&state);
+        if result.found && search_stalled(&before, &state, text, result.count.is_some()) {
+            self.copy_mode_command(&target, &[command]).await?;
+            state = self.display(&target, STATE).await?;
+        }
+        Ok(SearchResult::parse(&state))
+    }
+
+    /// The mouse wheel in copy mode: a program that takes the mouse on the
+    /// alternate screen (Claude Code, an editor) scrolls itself, and tmux
+    /// keeps no history for it, so there the wheel leaves copy mode and
+    /// goes to the program, as it does outside copy mode. Anywhere else it
+    /// scrolls through the history as before. tmux's own binding (which
+    /// differs between versions, or the user's) is kept for that. Only on
+    /// bosun's own server, and best-effort.
+    async fn wheel_reaches_mouse_programs(&self) {
+        if self.socket.is_none() {
+            return;
+        }
+        for table in ["copy-mode", "copy-mode-vi"] {
+            for key in ["WheelUpPane", "WheelDownPane"] {
+                let Ok(out) = self
+                    .run(&["list-keys", "-T", table, key], Retry::Safe)
+                    .await
+                else {
+                    continue;
+                };
+                let line = String::from_utf8_lossy(&out.stdout);
+                let Some(command) = wheel_command(&line, key) else {
+                    continue;
+                };
+                let args = [
+                    "bind-key",
+                    "-T",
+                    table,
+                    key,
+                    "if-shell",
+                    "-F",
+                    "-t",
+                    "=",
+                    WHEEL_TO_PROGRAM,
+                    "send-keys -X cancel ; send-keys -M",
+                    &command,
+                ];
+                match self.run(&args, Retry::Safe).await {
+                    Ok(out) if !out.success => {
+                        tracing::warn!("bind {table} {key}: {}", out.stderr.trim())
+                    }
+                    Err(e) => tracing::warn!("bind {table} {key}: {e}"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// `display-message -p -t <target> <format>`, trimmed.
+    async fn display(&self, target: &str, format: &str) -> Result<String> {
+        let out = self
+            .run(
+                &["display-message", "-p", "-t", target, format],
+                Retry::Safe,
+            )
+            .await?;
+        if !out.success {
+            return Err(BosunError::Tmux(format!(
+                "display-message {target}: {}",
+                out.stderr.trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// `send-keys -t <target> -X <command…>`: a copy-mode command.
+    async fn copy_mode_command(&self, target: &str, command: &[&str]) -> Result<()> {
+        let mut args = vec!["send-keys", "-t", target, "-X"];
+        args.extend_from_slice(command);
+        let out = self.run(&args, Retry::Unsafe).await?;
+        if out.success {
+            Ok(())
+        } else {
+            Err(BosunError::Tmux(format!(
+                "{}: {}",
+                command[0],
                 out.stderr.trim()
             )))
         }
@@ -1406,6 +1691,111 @@ mod tests {
         for e in ["can't find session: foo", "usage: list-sessions"] {
             assert!(!is_empty_server_stderr(e), "should be a real error: {e}");
         }
+    }
+
+    #[test]
+    fn search_result_reads_tmux_formats() {
+        let r = |found, count, partial| SearchResult {
+            found,
+            count,
+            partial,
+        };
+        assert_eq!(SearchResult::parse("1|29|0"), r(true, Some(29), false));
+        assert_eq!(SearchResult::parse("1|1000|1"), r(true, Some(1000), true));
+        // tmux 3.4: no count.
+        assert_eq!(SearchResult::parse("1||"), r(true, None, false));
+        assert_eq!(SearchResult::parse("0||"), r(false, None, false));
+        assert_eq!(SearchResult::parse(""), r(false, None, false));
+    }
+
+    #[test]
+    fn search_stalled_tells_the_same_match_from_the_next() {
+        // tmux 3.8, "row 29": changing direction from the start of the
+        // match only reaches its end, and back.
+        assert!(search_stalled(
+            "1|11|0|0|24|0",
+            "1|11|0|0|24|6",
+            "row 29",
+            true
+        ));
+        assert!(search_stalled(
+            "1|11|0|0|25|6",
+            "1|11|0|0|25|0",
+            "row 29",
+            true
+        ));
+        // A real step: another line, or scrolled, or a second match
+        // further along the same line.
+        assert!(!search_stalled(
+            "1|11|0|0|25|0",
+            "1|11|0|0|24|0",
+            "row 29",
+            true
+        ));
+        assert!(!search_stalled(
+            "1|11|0|0|0|0",
+            "1|11|0|3|0|0",
+            "row 29",
+            true
+        ));
+        assert!(!search_stalled(
+            "1|2|0|0|5|0",
+            "1|2|0|0|5|12",
+            "row 29",
+            true
+        ));
+        // tmux 3.4: the line alone.
+        assert!(search_stalled("1|||0|5|0", "1|||0|5|12", "row 29", false));
+        assert!(!search_stalled("1|||0|5|0", "1|||0|4|0", "row 29", false));
+        assert!(!search_stalled("", "1|11|0|0|24|6", "row 29", true));
+    }
+
+    #[test]
+    fn wheel_command_keeps_the_history_binding() {
+        // tmux 3.4 (and 3.8 without a config).
+        assert_eq!(
+            wheel_command(
+                "bind-key -T copy-mode WheelUpPane       select-pane \\; send-keys -X -N 5 scroll-up\n",
+                "WheelUpPane"
+            )
+            .as_deref(),
+            Some("select-pane ; send-keys -X -N 5 scroll-up")
+        );
+        assert_eq!(
+            wheel_command(
+                "bind-key  -T copy-mode-vi WheelDownPane     send-keys -X scroll-down",
+                "WheelDownPane"
+            )
+            .as_deref(),
+            Some("send-keys -X scroll-down")
+        );
+        // Unbound, or Bosun's already.
+        assert_eq!(wheel_command("", "WheelUpPane"), None);
+        assert_eq!(
+            wheel_command(
+                "bind-key -T copy-mode WheelUpPane if-shell -F -t = \"#{&&:#{alternate_on},#{mouse_any_flag}}\" \"send-keys -X cancel ; send-keys -M\" \"send-keys -X scroll-up\"",
+                "WheelUpPane"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn search_pattern_sets_the_case_rule() {
+        // Case ignored: lowercase, which tmux searches without case.
+        assert_eq!(search_pattern("TUI", false), "tui");
+        assert_eq!(search_pattern("tui", false), "tui");
+        // Case matched: a capital that matches nothing, unless the text
+        // has its own, or no letters at all.
+        assert_eq!(search_pattern("tui", true), "[A]{0}tui");
+        assert_eq!(search_pattern("TUI", true), "TUI");
+        assert_eq!(search_pattern("12:30", true), "12:30");
+        // The text is literal.
+        assert_eq!(search_pattern("row.7 (a|b)*", false), r"row\.7 \(a\|b\)\*");
+        assert_eq!(
+            search_pattern(r"C:\x [1]{2}^$+?", false),
+            r"c:\\x \[1\]\{2\}\^\$\+\?"
+        );
     }
 
     const SEP: &str = "|||";

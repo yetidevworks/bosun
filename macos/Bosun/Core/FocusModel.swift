@@ -12,6 +12,8 @@ public struct FocusModel: Equatable, Sendable {
         /// The sidebar filter's field while it has the ring. What was typed can stay applied after the
         /// keyboard has gone back (a chip with no ring), but only the field with its ring holds the keyboard.
         case filter
+        /// The find bar on the active pane (Cmd+F) while its field has the keyboard.
+        case find
     }
 
     public enum ClickResult: Equatable, Sendable {

@@ -1,7 +1,7 @@
 import AppKit
 import BosunCore
 
-// Focus-test section for the sidebar filter (Cmd+F) and the header (design 7): the field borrows the
+// Focus-test section for the sidebar filter (Option+Cmd+F) and the header (design 7): the field borrows the
 // keyboard like rename and the palette do, typed keys never reach the pane, Return keeps the filter as
 // a chip and hands the keyboard back, Esc clears it, a click elsewhere keeps it, the row on screen is
 // never hidden, Cmd+1…9 and Shift+Up/Down follow what's listed, and each window has its own filter.
@@ -38,17 +38,17 @@ extension FocusTest {
         }
         await showRow(f.api)
         let allRows = app.daemon.state.sidebar.allRows.count
-        r.check("filter: nothing in the sidebar until Cmd+F (no field, no filter)", filterBar.isHidden && app.sidebar.filtered == nil)
+        r.check("filter: nothing in the sidebar until Option+Cmd+F (no field, no filter)", filterBar.isHidden && app.sidebar.filtered == nil)
 
         // A collapsed section with a match shows expanded for the filter, without changing its saved state.
         app.setSectionCollapsed(reviews, true)
         await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == reviews }?.collapsed == true }
         await sleep(100)
 
-        // Cmd+F: the field, with the keyboard.
-        await cmd("f")
+        // Option+Cmd+F: the field, with the keyboard.
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
-        r.check("filter: Cmd+F opens the field and gives it the keyboard (the filter exception)",
+        r.check("filter: Option+Cmd+F opens the field and gives it the keyboard (the filter exception)",
                 app.focus.exception == .filter && filterFieldHasKeyboard && !filterBar.isHidden, "fr=\(String(describing: w.firstResponder.map { Swift.type(of: $0) }))")
         r.check("…with the accent ring", filterBar.editing && filterBar.layer?.borderWidth == 2)
         r.check("…and the terminal isn't first responder while it does", !firstResponderIsActiveTerminal)
@@ -105,11 +105,11 @@ extension FocusTest {
         }
         r.check("filter: Shift+Down steps through the listed rows only", stepped == [r2Row, r1Row, r2Row], label(stepped))
 
-        // Cmd+F again: the field, with the query selected; a click elsewhere keeps it.
-        await cmd("f")
+        // Option+Cmd+F again: the field, with the query selected; a click elsewhere keeps it.
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
         let sel = (w.firstResponder as? NSTextView)?.selectedRange()
-        r.check("filter: Cmd+F on the chip gives the field the keyboard again, the query selected",
+        r.check("filter: Option+Cmd+F on the chip gives the field the keyboard again, the query selected",
                 app.focus.exception == .filter && filterFieldHasKeyboard && sel == NSRange(location: 0, length: 7), "\(String(describing: sel))")
         if let p = sidebarRowPoint(r1Row) { await click(p) }
         await waitUntil(2) { app.focus.exception == nil && ws.currentRow == r1Row }
@@ -128,7 +128,7 @@ extension FocusTest {
         shot("52-filter-on-screen")
 
         // Cmd+K from the field keeps the filter and opens the palette.
-        await cmd("f")
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
         await cmd("k")
         await waitUntil(2) { app.paletteOpen }
@@ -147,7 +147,7 @@ extension FocusTest {
         r.check("…and Esc ends it with the filter still applied", app.focus.exception == nil && app.sidebar.filtered?.query == "review-" && firstResponderIsActiveTerminal)
 
         // No matches: says so, offers Clear, and the row on screen is still listed.
-        await cmd("f")
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
         await type("zzq")
         await sleep(150)
@@ -173,13 +173,13 @@ extension FocusTest {
         app.setSectionCollapsed(reviews, false)
         await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == reviews }?.collapsed == false }
 
-        // Cmd+F on an empty field closes it; Return on an empty field too.
-        await cmd("f")
+        // Option+Cmd+F on an empty field closes it; Return on an empty field too.
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
-        await cmd("f")
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == nil }
-        r.check("filter: Cmd+F with the field empty closes it", filterBar.isHidden && app.focus.exception == nil && firstResponderIsActiveTerminal)
-        await cmd("f")
+        r.check("filter: Option+Cmd+F with the field empty closes it", filterBar.isHidden && app.focus.exception == nil && firstResponderIsActiveTerminal)
+        await cmd("f", .option)
         await waitUntil(2) { app.focus.exception == .filter }
         await type("\n")
         await waitUntil(2) { app.focus.exception == nil }
@@ -206,7 +206,7 @@ extension FocusTest {
             // The first window's row in the second's sidebar: ⧉ with a tooltip that says what a click does.
             let apiTip = cellTrailingTip(second, row: apiRow)
             r.check("the ⧉ mark has a tooltip saying what a click does", apiTip?.contains("click to bring it forward") == true, apiTip ?? "no tooltip")
-            await cmd("f")
+            await cmd("f", .option)
             await waitUntil(2) { second.focus.exception == .filter }
             await type("doc", window: second.window)
             await type("\n", window: second.window)

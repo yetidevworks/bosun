@@ -491,6 +491,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             closePalette()
             if focus.exception == .rename { window.makeFirstResponder(nil) }
             sidebar.commitFilter()
+            current.closeFind(leaveCopyMode: true)
             setCurrent(bw)
         }
         if e.window === window, shortcutsPanel != nil { closeShortcuts() }
@@ -509,6 +510,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             let bar = v.filterBar, mag = v.header.magnifier
             if bar.bounds.contains(bar.convert(e.locationInWindow, from: nil)) || mag.bounds.contains(mag.convert(e.locationInWindow, from: nil)) { return }
             sidebar.commitFilter()
+        case .find:
+            // A click on the bar is its own. A click in the pane keeps it where the search took it (to
+            // select from there); anywhere else, the pane goes back to its live output.
+            guard let s = current.findSession else { return }
+            if let bar = workspace.findBar(for: s), bar.bounds.contains(bar.convert(e.locationInWindow, from: nil)) { return }
+            let t = workspace.terminal(in: s)
+            let inPane = t.map { $0.bounds.contains($0.convert(e.locationInWindow, from: nil)) } ?? false
+            current.closeFind(leaveCopyMode: !inPane)
         case .sheet:
             break
         }
@@ -1695,6 +1704,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// read from the menus, so the panel and the menus can't disagree.
     static let shortcutCatalog: [(group: String, rows: [(title: String, items: [String])])] = [
         ("Sessions", [("New session", ["New Session…"]), ("Go to session", ["Go to Session…"]), ("Filter the sidebar", ["Filter Sessions"]),
+                      ("Find in the pane's history", ["Find in Pane…"]), ("Next / previous match", ["Find Next", "Find Previous"]),
                       ("Oldest waiting session", ["Oldest Waiting Session"]), ("Sidebar row 1 to 9", ["Row 1", "Row 9"])]),
         ("Panes (a row's tabs)", [("New terminal tab, split right", ["Split Right"]), ("New terminal tab, split down", ["Split Down"]),
                    ("New tab with an agent (sheet), split right", ["New Tab…"]),
@@ -2031,6 +2041,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         edit.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
         edit.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
         edit.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        edit.addItem(.separator())
+        add(edit, "Find in Pane…", #selector(menuFind), "f", target: self)
+        add(edit, "Find Next", #selector(menuFindAgain(_:)), "g", target: self, tag: 0)
+        add(edit, "Find Previous", #selector(menuFindAgain(_:)), "G", [.command, .shift], target: self, tag: 1)
 
         let view = sub("View")
         add(view, "Split Right", #selector(menuSplitRight), "d", target: self)
@@ -2041,7 +2055,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         for (t, k, tag) in arrows { add(view, t, #selector(menuFocusTile(_:)), String(Character(k)), [.command, .option], target: self, tag: tag) }
         add(view, "Zoom Pane", #selector(menuZoomPane), "\r", target: self)
         view.addItem(.separator())
-        add(view, "Filter Sessions", #selector(menuFilter), "f", target: self)
+        add(view, "Filter Sessions", #selector(menuFilter), "f", [.command, .option], target: self)
         view.addItem(.separator())
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeMenu.delegate = self
@@ -2126,6 +2140,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
     @objc func menuPalette() { showPalette() }
     @objc func menuFilter() { sidebar.toggleFilter() }
+    @objc func menuFind() { current.openFind() }
+    /// Find Next goes to the next older match (up the history), Find Previous to the next newer one.
+    @objc func menuFindAgain(_ item: NSMenuItem) { current.findAgain(item.tag == 0 ? .older : .newer) }
     @objc func menuZoomPane() { workspace.toggleZoom() }
     @objc func menuNewWindow() { openWindow(row: nil) }
     @objc func menuCloseWindow() { window.performClose(nil) }
@@ -2204,6 +2221,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return true
         case #selector(menuCloseTile):
             return workspace.layout.active.map(isAlive) ?? false
+        case #selector(menuFind), #selector(menuFindAgain(_:)):
+            return workspace.activeTerminal != nil
         case #selector(menuNav(_:)):
             // Only while the terminal has the keyboard (the key monitor takes these keys first then).
             // Disabled otherwise, so Shift+arrows in the rename field or the palette, or while composing

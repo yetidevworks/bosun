@@ -84,7 +84,7 @@ final class SidebarHeader: NSView {
         magnifier.isBordered = false
         magnifier.bezelStyle = .regularSquare
         magnifier.refusesFirstResponder = true
-        magnifier.toolTip = "Filter sessions (⌘F)"
+        magnifier.toolTip = "Filter sessions (⌥⌘F)"
         magnifier.target = self
         magnifier.action = #selector(magnifierClicked)
         addSubview(magnifier)

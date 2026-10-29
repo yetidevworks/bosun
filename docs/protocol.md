@@ -298,6 +298,33 @@ Makes the client on `tty` tmux's latest client for its session, so under `window
 
 It has the side effects of a keypress in that client: tmux redraws the client and bumps the session's activity time, which can make an activity-based status read briefly as running. The alternative is for the view to write a focus-in report (`ESC [ I`) into its own pty, which tmux swallows and treats as input from that client; with tmux's `focus-events on`, Ghostty already does this when the view gains focus. Use `make_latest` when the view is shown without taking focus.
 
+#### `search`
+
+```json
+{"t":"cmd","id":18,"op":"search","session":"bosun-api-1a2b3c4d","action":"find","text":"pages_manage"}
+```
+
+Searches a session's whole history. The history is tmux's, so the search runs in tmux's copy mode on the session's active pane: tmux scrolls the pane to the match and highlights every other one, in every client attached to it (the TUI showing the same session sees it too). `action` is one of:
+
+- `find`: search for `text`, towards older output, from the bottom of the history. Send it on every keystroke: each one searches again from the bottom. An empty `text` ends the search, as `end` does.
+- `older` and `newer`: the next match in that direction, wrapping round at the ends. If the pane has left copy mode since (`q` in it, or another client), they start the search for `text` again.
+- `end`: leave copy mode, so the pane is back at its live output. It does nothing on a pane that isn't in copy mode.
+
+`text` is literal (the daemon turns it into a regular expression for tmux, with every special character escaped). Case is ignored unless `match_case` is `true`. On a `find`, an optional `colors` sets how matches look, so they follow the client's theme rather than tmux's defaults (the terminal's magenta and cyan): `current_bg` and `current_fg` for the match the pane is on, `match_bg` and `match_fg` for every other one, each `#rrggbb`. The daemon sets them as the window's `copy-mode-current-match-style` and `copy-mode-match-style`, and leaves them out if any isn't `#rrggbb`.
+
+```json
+{"t":"cmd","id":19,"op":"search","session":"bosun-api-1a2b3c4d","action":"find","text":"TUI","match_case":true,
+ "colors":{"current_bg":"#7c5cff","current_fg":"#f2f3f5","match_bg":"#33295b","match_fg":"#e6e9ef"}}
+```
+
+On bosun's own tmux server, starting a search also makes the mouse wheel in copy mode go to a program that takes the mouse on the alternate screen (leaving copy mode), since tmux keeps no history for it; elsewhere the wheel keeps tmux's own copy-mode binding.
+
+The `ack` carries where the search stands in `search`: `found` (the pane is on a match), `count` (how many matches the whole history has; absent on tmux 3.4, which doesn't count them) and `partial` (`true` when tmux stopped counting early, so there are at least `count`). After `end`, `found` is `false`. A session that doesn't exist is an error.
+
+```json
+{"t":"ack","id":18,"ok":true,"search":{"found":true,"count":12}}
+```
+
 ### Spec
 
 What the new-session form collects:
@@ -501,7 +528,7 @@ These are events, not state: they aren't in the `snapshot` and a `resync` doesn'
 {"t":"ack","id":7,"ok":false,"error":"worktree has uncommitted changes; not removed","messages":["worktree has uncommitted changes; not removed"]}
 ```
 
-The reply to one `cmd`. `ok` says whether it worked; `error` is a human-readable reason when it didn't. Optional fields: `session` (`create`), `spec` (`get_spec`), `pending_launch` (`create` and `restart` with `defer_launch`) and `messages` (every `notice` the command caused).
+The reply to one `cmd`. `ok` says whether it worked; `error` is a human-readable reason when it didn't. Optional fields: `session` (`create`), `spec` (`get_spec`), `pending_launch` (`create` and `restart` with `defer_launch`), `search` (`search`) and `messages` (every `notice` the command caused).
 
 ### `error`
 

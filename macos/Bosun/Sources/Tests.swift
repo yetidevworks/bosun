@@ -485,7 +485,7 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
+        // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, find, sheet,
         // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew, parking, fonts, settings, sheetkeys).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
@@ -500,6 +500,7 @@ final class FocusTest: TestKit {
             if parts.contains("termcolours") { await terminalColoursFollowEveryTheme() }
             if parts.contains("links") { await links() }
             if parts.contains("filter") { await filter(f) }
+            if parts.contains("find") { await find(f) }
             if parts.contains("sectionnew") { await newSessionInSection() }
             if parts.contains("parking") { await parking(f) }
             if parts.contains("fonts") { await fonts(f) }
@@ -884,8 +885,10 @@ final class FocusTest: TestKit {
         // 17b. Cmd+click on URLs and paths.
         await links()
 
-        // 17c. The sidebar filter (Cmd+F).
+        // 17c. The sidebar filter (Option+Cmd+F).
         await filter(f)
+        // 17d. Find in a pane (Cmd+F).
+        await find(f)
 
         // 18–22. Sheet layout, placeholders, pane drag, sidebar drag, the shortcuts panel.
         await layoutSections(nil)

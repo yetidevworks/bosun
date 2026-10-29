@@ -1,6 +1,6 @@
 import Foundation
 
-/// The sidebar filter (Cmd+F): which rows a query keeps, and where the matched characters of their
+/// The sidebar filter (Option+Cmd+F): which rows a query keeps, and where the matched characters of their
 /// names are. Names (the row's and its tabs') match as the palette does, by subsequence; the agent, the
 /// last two components of the directory and the section name need the query as a whole, since a
 /// subsequence of a long path matches almost anything; and a query of two letters or more that

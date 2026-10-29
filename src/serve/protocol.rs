@@ -212,6 +212,60 @@ pub enum CmdOp {
     MakeLatest {
         tty: String,
     },
+    /// Search a session's history in tmux's copy mode. The ack carries
+    /// where the search stands in `search`.
+    Search {
+        session: String,
+        action: SearchAction,
+        /// The search text. `find` with an empty text ends the search.
+        #[serde(default)]
+        text: String,
+        /// Match the text's case exactly. Off, case is ignored.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        match_case: bool,
+        /// How matches look (`find` only): the client's theme, since
+        /// tmux's defaults use the terminal's cyan and magenta.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colors: Option<SearchColors>,
+    },
+}
+
+/// The match highlights for a `search`, as `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchColors {
+    /// The match the pane is on.
+    pub current_bg: String,
+    pub current_fg: String,
+    /// Every other match.
+    pub match_bg: String,
+    pub match_fg: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchAction {
+    /// Search for `text` as typed so far, towards older output.
+    Find,
+    /// The next match towards older output.
+    Older,
+    /// The next match towards newer output.
+    Newer,
+    /// Leave copy mode, back to the live output.
+    End,
+}
+
+/// Where a `search` stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchWire {
+    /// The pane is scrolled to a match.
+    pub found: bool,
+    /// Matches in the whole history; absent when tmux doesn't count
+    /// them (3.4 doesn't).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    /// tmux stopped counting early: there are at least `count`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 fn default_true() -> bool {
@@ -379,6 +433,9 @@ pub struct Ack {
     /// Every Bosun message produced while the command ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
+    /// `search`: where the search stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1359,25 @@ mod tests {
             },
             CmdOp::MakeLatest {
                 tty: "/dev/ttys004".into(),
+            },
+            CmdOp::Search {
+                session: "bosun-a-1".into(),
+                action: SearchAction::Older,
+                text: "pages_manage".into(),
+                match_case: false,
+                colors: None,
+            },
+            CmdOp::Search {
+                session: "bosun-a-1".into(),
+                action: SearchAction::Find,
+                text: "TUI".into(),
+                match_case: true,
+                colors: Some(SearchColors {
+                    current_bg: "#bd93f9".into(),
+                    current_fg: "#000000".into(),
+                    match_bg: "#4b3f6b".into(),
+                    match_fg: "#f8f8f2".into(),
+                }),
             },
         ];
         for (i, op) in ops.into_iter().enumerate() {
