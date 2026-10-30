@@ -708,6 +708,16 @@ impl SidebarModel {
         false
     }
 
+    /// Make `internal` the active tab of the row `container_id`, moving
+    /// it there from whatever row holds it. Returns true if it moved;
+    /// false when it's already there or either side is unknown.
+    pub fn join_row(&mut self, internal: &str, container_id: &str) -> bool {
+        match self.move_tab(internal, Some(container_id), None) {
+            Ok(Some(_)) => self.set_active_tab(container_id, internal),
+            _ => false,
+        }
+    }
+
     /// Look up a container by id.
     pub fn find_container(&self, container_id: &str) -> Option<&Container> {
         for c in &self.ungrouped {

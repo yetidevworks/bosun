@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
 
+## [2.2.12] — 2026-10-30
+
+### Both
+
+#### Fixed
+
+- **Add Tab adds a tab when a second Bosun is running.** With two Bosuns on the same tmux server (say one local and one over SSH), a new tab came up as a new row instead (#23). The other Bosun saw the session before its row id was set on it, gave it a row of its own and saved that layout, which the first one then picked up. The Bosun that created the tab now moves it into the row it was added to. Thanks to @attilaolah for the report.
+
 ## [2.2.11] — 2026-10-29
 
 ### Bosun for Mac

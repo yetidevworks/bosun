@@ -1047,7 +1047,23 @@ impl AppState {
                     .iter()
                     .map(|v| (v.name().to_string(), v.session.container_id.clone()))
                     .collect();
-                let reconcile_changed = self.sidebar.reconcile(&live);
+                let mut reconcile_changed = self.sidebar.reconcile(&live);
+
+                // A session this process just created as a tab belongs
+                // in the row it was made for. Another bosun on the same
+                // tmux server can list it between `new-session` and the
+                // `@bosun_container_id` option being set, file it as a
+                // row of its own and save that layout, which this
+                // process adopts before reconcile runs (issue #23).
+                if let Some(target) = select_after.as_deref() {
+                    let cid = live
+                        .iter()
+                        .find(|(n, _)| n == target)
+                        .and_then(|(_, cid)| cid.as_deref());
+                    if let Some(cid) = cid {
+                        reconcile_changed |= self.sidebar.join_row(target, cid);
+                    }
+                }
 
                 // Opt-in auto-removal. `reconcile` keeps a row whose
                 // session has gone so `R` can restart it; with
@@ -5360,6 +5376,42 @@ mod tests {
         assert_eq!(saved.ungrouped, external.ungrouped);
         assert_eq!(saved.sections[0], external.sections[0]);
         assert_eq!(saved.sections[1].name, "later");
+    }
+
+    /// Issue #23: a second bosun listed the new tab before its
+    /// `@bosun_container_id` was set and saved it as a row of its own.
+    /// This process adopted that layout; its own create refresh puts the
+    /// tab back in the row it was added to.
+    #[test]
+    fn created_tab_joins_its_row_after_another_process_filed_it_alone() {
+        let mut s = AppState::default();
+        let row = con("a");
+        let row_id = row.id.clone();
+        s.sessions = vec![ses("a")];
+        s.sidebar = SidebarModel {
+            ungrouped: vec![row.clone()],
+            sections: vec![],
+            ended_names: Default::default(),
+        };
+        s.adopt_external_sidebar(SidebarModel {
+            ungrouped: vec![row, con("n")],
+            sections: vec![],
+            ended_names: Default::default(),
+        });
+
+        let mut n = ses("n");
+        n.session.container_id = Some(row_id.clone());
+        let out = s.apply(refreshed_selecting(vec![ses("a"), n], "n"));
+
+        assert_eq!(s.sidebar.ungrouped.len(), 1, "the stray row is gone");
+        let c = &s.sidebar.ungrouped[0];
+        assert_eq!(c.id, row_id);
+        assert_eq!(c.members, vec!["a".to_string(), "n".to_string()]);
+        assert_eq!(c.active, "n", "the new tab is the one shown");
+        assert!(
+            out.iter().any(|c| matches!(c, Command::SaveSidebar(_))),
+            "the fix is saved for the other process to pick up"
+        );
     }
 
     #[test]
