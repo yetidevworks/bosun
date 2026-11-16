@@ -4,12 +4,15 @@
 use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::process::Command;
 
+use crate::agent_hooks::is_shell_command;
 use crate::error::{BosunError, Result};
 use crate::tmux::command_channel::{CommandChannel, Outcome};
+use crate::tmux::foreground::{self, ProcTable};
 use crate::tmux::parse::{
     parse_list_sessions, parse_status_rows, LIST_SESSIONS_FORMAT, STATUS_POLL_FORMAT,
 };
@@ -235,6 +238,9 @@ pub trait TmuxClient: Send + Sync {
 pub struct TokioTmuxClient {
     socket: Option<String>,
     channel: Arc<CommandChannel>,
+    /// Process table for panes behind a PTY proxy (#24); see
+    /// [`crate::tmux::foreground`].
+    procs: ProcTable,
 }
 
 /// Output of one tmux command, whichever way it was carried. For the
@@ -392,7 +398,11 @@ impl TokioTmuxClient {
             socket.clone(),
             crate::tmux::command_channel::enabled_from_env(),
         ));
-        Self { socket, channel }
+        Self {
+            socket,
+            channel,
+            procs: ProcTable::default(),
+        }
     }
 
     /// Same socket, but every command execs (the pre-control-mode
@@ -434,7 +444,9 @@ impl TokioTmuxClient {
 
         if output.success {
             let s = String::from_utf8_lossy(&output.stdout);
-            return parse(&s);
+            let mut sessions = parse(&s)?;
+            self.look_through_proxies(&mut sessions).await;
+            return Ok(sessions);
         }
 
         // tmux exits non-zero when there are no sessions. The phrasing varies
@@ -459,6 +471,54 @@ impl TokioTmuxClient {
             "list-sessions failed: {}",
             stderr.trim()
         )))
+    }
+
+    /// Replace a PTY proxy's name in `pane_command` (`atuin`, which is
+    /// all tmux can see behind one) with the pane's real foreground
+    /// command (#24). Costs nothing unless some pane reports a proxy;
+    /// then one `list-sessions` for the panes' terminals and one `ps`,
+    /// read at most about once a second. On any failure the rows keep
+    /// what tmux said.
+    async fn look_through_proxies(&self, sessions: &mut [TmuxSession]) {
+        if !sessions.iter().any(|s| {
+            s.pane_command
+                .as_deref()
+                .is_some_and(foreground::is_pty_proxy)
+        }) {
+            return;
+        }
+        let Ok(out) = self
+            .run(
+                &["list-sessions", "-F", "#{session_name}|||#{pane_tty}"],
+                Retry::Safe,
+            )
+            .await
+        else {
+            return;
+        };
+        if !out.success {
+            return;
+        }
+        let Some(procs) = self.procs.get(Duration::from_secs(1)).await else {
+            return;
+        };
+        let ttys = String::from_utf8_lossy(&out.stdout);
+        for s in sessions.iter_mut() {
+            if !s
+                .pane_command
+                .as_deref()
+                .is_some_and(foreground::is_pty_proxy)
+            {
+                continue;
+            }
+            let tty = ttys
+                .lines()
+                .find_map(|l| l.split_once("|||").filter(|(name, _)| *name == s.name))
+                .map(|(_, tty)| tty);
+            if let Some(cmd) = tty.and_then(|t| foreground::resolve(&procs, t)) {
+                s.pane_command = Some(cmd);
+            }
+        }
     }
 
     pub async fn run(&self, args: &[&str], retry: Retry) -> Result<TmuxOutput> {
@@ -746,19 +806,30 @@ impl TokioTmuxClient {
     /// `python3` while an agent is running. Returns an empty string if
     /// the session has gone away. Used by `restart_in_place` to poll
     /// for "agent has died" and "agent has started" without relying on
-    /// fixed-duration sleeps.
+    /// fixed-duration sleeps. Looks through a PTY proxy such as Atuin's
+    /// (#24), reading the process table afresh each time, since the
+    /// restart is waiting on exactly that change.
     async fn pane_current_command(&self, session: &str) -> String {
         let args = [
             "display-message",
             "-p",
             "-t",
             session,
-            "#{pane_current_command}",
+            "#{pane_current_command}|||#{pane_tty}",
         ];
-        match self.run(&args, Retry::Safe).await {
+        let out = match self.run(&args, Retry::Safe).await {
             Ok(out) if out.success => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            _ => String::new(),
+            _ => return String::new(),
+        };
+        let (cmd, tty) = out.split_once("|||").unwrap_or((&out, ""));
+        if foreground::is_pty_proxy(cmd) {
+            if let Some(procs) = self.procs.get(Duration::ZERO).await {
+                if let Some(inner) = foreground::resolve(&procs, tty) {
+                    return inner;
+                }
+            }
         }
+        cmd.to_string()
     }
 
     /// `send-keys -t <session> <keys…>`, logging (not returning) a
@@ -783,17 +854,6 @@ fn check_client_tty(tty: &str) -> Result<()> {
             "client tty must be a /dev path, got {tty:?}"
         )))
     }
-}
-
-/// Heuristic: is this pane's foreground process a shell prompt, i.e.
-/// safe to type a launch command into? Matches the common login
-/// shells. False negatives just mean `restart_in_place` waits a bit
-/// longer for shell detection before falling through on timeout.
-fn is_shell(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "pwsh"
-    )
 }
 
 impl Default for TokioTmuxClient {
@@ -1165,7 +1225,7 @@ impl TmuxClient for TokioTmuxClient {
                 // Session went away — nothing to restart.
                 return Ok(());
             }
-            if is_shell(&cur) {
+            if is_shell_command(&cur) {
                 at_shell = true;
                 break;
             }
@@ -1276,7 +1336,7 @@ impl TmuxClient for TokioTmuxClient {
                     // Session vanished.
                     return Ok(());
                 }
-                if !is_shell(&cur) {
+                if !is_shell_command(&cur) {
                     agent_up = true;
                     break;
                 }

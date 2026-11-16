@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
 
+## [2.2.13] — 2026-11-16
+
+### Both
+
+#### Fixed
+
+- **Agents launch and restart properly when the shell runs behind a PTY proxy.** Atuin's output capture (`atuin pty-proxy`, which Atuin's fish integration can start at the first prompt), `script` and `asciinema rec` own the pane's terminal and run the shell on a second one, so tmux reports `atuin` as the pane's command at the prompt and while an agent runs alike (#24). Bosun couldn't tell a bare shell from a live agent: every launch and restart waited out a 3.5 second timeout, sending Ctrl-C to the shell throughout, the check that resends a launch command a slow shell dropped never ran, and an agent that exited never read as a shell to the status detectors. When tmux reports one of those proxies, Bosun now follows it to the terminal the shell is on and reads that terminal's foreground process from `ps`, at most about once a second for the status poll. Only those known proxies are followed, since an agent can run its own tools on a terminal of their own (Codex does), and a tool's shell must not read as the agent exiting. Panes without a proxy work as before and cost nothing extra. Thanks to @attilaolah for the report.
+
 ## [2.2.12] — 2026-10-30
 
 ### Both
